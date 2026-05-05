@@ -1,0 +1,20 @@
+{
+  "vBRIEFInfo": {
+    "version": "0.6",
+    "author": "agent:deft-directive-setup",
+    "description": "Five transport adapters: WebSocket, WebRTC DataChannel, TCP, stdio, QUIC/WebTransport",
+    "created": "2026-05-04T19:41:05Z"
+  },
+  "plan": {
+    "title": "Transport Adapters",
+    "status": "completed",
+    "narratives": {
+      "Description": "Implement one TransportAdapter per spec-defined transport in src/transports/. Each adapter implements the interface { send(data: Uint8Array): void; receive(): AsyncIterable<Uint8Array>; close(): void }. websocket-adapter.ts: wraps native WebSocket (browser) or Node.js built-in WebSocket/ws; no magic bytes. webrtc-adapter.ts: wraps RTCDataChannel (browser/node-datachannel); no magic bytes. tcp-adapter.ts: wraps Node.js net.Socket; writes and validates OMUX magic. stdio-adapter.ts: wraps process.stdin/stdout; writes and validates OMUX magic. quic-adapter.ts: wraps WebTransport stream; no magic bytes. Transport adapters are tree-shakeable separate entry points. Node.js-specific adapters (tcp, stdio) are in Node-only entry points; browser-safe adapters (websocket, webrtc, quic) have no Node.js API imports.",
+      "Traces": "FR-13, FR-14, FR-15, FR-16, FR-17, NFR-1, NFR-4, NFR-5",
+      "Files": "src/transports/websocket-adapter.ts, src/transports/webrtc-adapter.ts, src/transports/tcp-adapter.ts, src/transports/stdio-adapter.ts, src/transports/quic-adapter.ts, src/transports/types.ts, src/transports/index.ts",
+      "Tests": "tests/transports/websocket-adapter.test.ts, tests/transports/webrtc-adapter.test.ts, tests/transports/tcp-adapter.test.ts, tests/transports/stdio-adapter.test.ts, tests/transports/quic-adapter.test.ts"
+    },
+    "items": [],
+    "updated": "2026-05-04T21:23:11Z"
+  }
+}

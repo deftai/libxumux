@@ -1,0 +1,21 @@
+{
+  "vBRIEFInfo": {
+    "version": "0.6",
+    "author": "agent:deft-directive-setup",
+    "description": "Push unit test coverage to 100% LOC across all source files",
+    "created": "2026-05-04T22:58:59Z"
+  },
+  "plan": {
+    "title": "Unit Test Coverage — 100% LOC",
+    "status": "completed",
+    "narratives": {
+      "Description": "Close all remaining unit test coverage gaps to achieve 100% line coverage across the entire src/ tree (excluding type-only and barrel files that have no executable code). Key gaps to close: (1) handler.ts — keepalive PING timer fires, PONG timeout triggers close, destroy() rejects pending openChannel calls; use vi.useFakeTimers() / vi.advanceTimersByTime(). (2) connection.ts — unknown-channel data frame sends ERROR, channel-full rejects OPEN_CHANNEL, closeChannel() on non-existent channel ID, receiveLoop EOF branch. (3) channel.ts — WritableStream close() sets state='closing', WritableStream abort() sets state='closed', terminate() catch block (error on already-closed ReadableStream). (4) tcp-adapter.ts — magic bytes sent on first write, magic validated on receive, magic validation failure throws, FrameDecoder correctly reassembles frames from chunked stream; use node:stream PassThrough as Socket mock. (5) stdio-adapter.ts — same as TCP but with Readable/Writable PassThrough mocks. (6) Remove tcp-adapter.ts and stdio-adapter.ts from the vitest.config.ts coverage exclude list once tests cover them. Raise line/statement/function thresholds to 100 (branches remain at practical maximum ~95+ since some branches are structurally uncoverable).",
+      "Traces": "NFR-6 (>=85% coverage, extended to 100% LOC), NFR-1 (browser-safe separation validated by mock tests)",
+      "Files": "src/codec/decode-frame.test.ts (extend), src/codec/fragment.test.ts (extend), src/control/handler.test.ts (extend with fake timers), src/connection.test.ts (extend), src/channel.test.ts (new), src/transports/tcp-adapter.test.ts (new), src/transports/stdio-adapter.test.ts (new), vitest.config.ts (update thresholds + exclude list)",
+      "NewDevDeps": "None — vi.useFakeTimers() is built into Vitest; PassThrough is built into node:stream",
+      "Acceptance": "task test:coverage exits 0 with 100% lines/statements/functions in all included files. tcp-adapter.ts and stdio-adapter.ts removed from exclude list."
+    },
+    "items": [],
+    "updated": "2026-05-05T03:36:46Z"
+  }
+}

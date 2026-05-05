@@ -1,0 +1,21 @@
+{
+  "vBRIEFInfo": {
+    "version": "0.6",
+    "author": "agent:deft-directive-setup",
+    "description": "Property-based fuzz testing with fast-check for codec, control, and reassembler",
+    "created": "2026-05-04T22:58:59Z"
+  },
+  "plan": {
+    "title": "Fuzz Tests (fast-check)",
+    "status": "completed",
+    "narratives": {
+      "Description": "Add property-based fuzzing using fast-check (npm install --save-dev fast-check) integrated into Vitest via fc.assert(fc.property(...)). Cover all codec and control modules with the following invariants: (1) Frame codec round-trip — for any valid (channel 0-254, type 0-255, flags 0-7, payload 0-131072 bytes), encodeFrame then decodeFrame returns the original fields. EXTENDED_LENGTH flag is stripped on decode. (2) FrameDecoder streaming — for any valid frame split across arbitrary chunk boundaries (1 to N bytes per push), FrameDecoder.push() always reassembles the original complete frame bytes regardless of chunking strategy. No bytes are lost. bufferedBytes is 0 after the last chunk. (3) Fragment round-trip — for any payload (1 to 200KB) and any maxPayloadSize (64 to 65535), fragment() then Reassembler.push() reconstructs the original payload exactly. The fragment count equals ceil(len/maxPayloadSize). All fragments share the original channel+type. (4) Control JSON codec round-trip — for any HelloMessage, WelcomeMessage, OpenChannelMessage, CloseMessage, ErrorMessage with fuzz-generated field values, encodeX then decodeX returns structurally equivalent objects. (5) PING/PONG binary codec — for any timestamp in [0, 2^32-1], encodePing then decodePing returns the same timestamp. For any (echo, receiver) pair, encodePong then decodePong returns the same pair. (6) Magic validation — validateMagicBytes throws for any 4-byte sequence that is not exactly [0x4F, 0x4D, 0x55, 0x58]. (7) Reassembler error invariants — pushing a non-fragment frame while assembling always throws. Pushing FRAGMENT_END without a preceding FRAGMENT always throws. (8) Mutation safety — mutating the Uint8Array returned by encodeFrame does not affect subsequent decodeFrame calls (deep copy invariant). Add fast-check as a devDependency. Fuzz tests live in src/**/*.fuzz.test.ts files alongside existing unit tests.",
+      "Traces": "FR-1, FR-2, FR-3, FR-4, FR-5, FR-6, FR-12, NFR-2",
+      "Files": "src/codec/codec.fuzz.test.ts (new — frame codec, FrameDecoder, magic), src/codec/fragment.fuzz.test.ts (new — fragment/reassemble), src/control/control.fuzz.test.ts (new — JSON + binary codec), vitest.config.ts (add *.fuzz.test.ts to include glob), package.json (add fast-check devDep)",
+      "NewDevDeps": "fast-check ^3.x",
+      "Acceptance": "task test exits 0. All fast-check properties run >= 1000 examples each (fc.configureGlobal({ numRuns: 1000 })). No property violations."
+    },
+    "items": [],
+    "updated": "2026-05-05T03:38:55Z"
+  }
+}

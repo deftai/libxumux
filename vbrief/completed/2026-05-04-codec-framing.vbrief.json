@@ -1,0 +1,20 @@
+{
+  "vBRIEFInfo": {
+    "version": "0.6",
+    "author": "agent:deft-directive-setup",
+    "description": "Binary codec: frame encode/decode, fragmentation, OMUX magic",
+    "created": "2026-05-04T19:41:05Z"
+  },
+  "plan": {
+    "title": "Binary Codec & Framing",
+    "status": "completed",
+    "narratives": {
+      "Description": "Implement the xumux binary frame format in src/codec/. Covers standard (6-byte) and extended (8-byte) frame encoding and decoding, a streaming partial-read decoder suitable for TCP/stdio byte streams, message fragmentation (split large messages into FRAGMENT/FRAGMENT_END frames), fragment reassembly (accumulate until FRAGMENT_END, error on interleaving), and OMUX magic number write/validate for stream-oriented transports. All code in this scope is browser-safe (zero Node.js APIs).",
+      "Traces": "FR-1, FR-2, FR-3, FR-4, FR-5, FR-12, NFR-1",
+      "Files": "src/codec/encode-frame.ts, src/codec/decode-frame.ts, src/codec/fragment.ts, src/codec/magic.ts, src/codec/index.ts",
+      "Tests": "tests/codec/encode-frame.test.ts, tests/codec/decode-frame.test.ts, tests/codec/fragment.test.ts, tests/codec/magic.test.ts"
+    },
+    "items": [],
+    "updated": "2026-05-04T21:15:09Z"
+  }
+}

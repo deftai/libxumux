@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+.task/
+*.premigrate.*
+.env
+.env.*
+secrets/
+*.log
+.DS_Store

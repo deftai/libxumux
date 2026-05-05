@@ -1,0 +1,21 @@
+{
+  "vBRIEFInfo": {
+    "version": "0.6",
+    "author": "agent:deft-directive-setup",
+    "description": "E2E: WebRTC via node-datachannel — real DTLS/SCTP loopback between two in-process PeerConnections",
+    "created": "2026-05-05T04:09:24Z"
+  },
+  "plan": {
+    "title": "E2E — WebRTC node-datachannel (Real DTLS/SCTP)",
+    "status": "completed",
+    "narratives": {
+      "Description": "Add a real WebRTC DataChannel E2E test using the node-datachannel npm package (npm install --save-dev node-datachannel), which provides Node.js bindings for libdatachannel. Two PeerConnection instances are created in the same process and ICE negotiation is wired in-process via loopback (no STUN/TURN server required for loopback). Setup: (1) Create pc1 and pc2 with iceServers: []. (2) Wire ICE: pc1.onLocalDescription → pc2.setRemoteDescription, pc2.onLocalDescription → pc1.setRemoteDescription, pc1.onLocalCandidate → pc2.addRemoteCandidate, pc2.onLocalCandidate → pc1.addRemoteCandidate. (3) pc1.createDataChannel('omux/control', { protocol: 'x-xumux' }) — this triggers ICE negotiation. (4) Wait for pc2.onDataChannel to fire with the server-side DataChannel. (5) Wrap each DataChannel with WebRTCAdapter (dc must implement DataChannelLike — may require a thin shim for the node-datachannel API surface). (6) Create XumuxClient + XumuxServer on the two adapters and run the 5 standard E2E protocol scenarios. Shim requirements: node-datachannel uses onmessage, onclose, onopen callbacks (not addEventListener) — the WebRTCAdapter may need a thin adapter shim or node-datachannel may support addEventListener. Check node-datachannel API docs and implement accordingly. Add task e2e:webrtc:native to Taskfile.yml. Note: node-datachannel is a native binary (~15 MB per platform); CI matrix must include platform-specific builds.",
+      "Traces": "FR-14 (WebRTC DataChannel adapter), NFR-5 (optional peer dependencies for transport adapters)",
+      "Files": "tests/e2e/webrtc-native.e2e.test.ts (new), tests/e2e/node-dc-shim.ts (thin DataChannelLike shim for node-datachannel API), Taskfile.yml (add e2e:webrtc:native task), package.json (add node-datachannel devDep)",
+      "NewDevDeps": "node-datachannel ^0.x (native binary, platform-specific)",
+      "Acceptance": "task e2e:webrtc:native exits 0 on macOS, Linux, and Windows. All 5 protocol scenarios pass over a real DTLS/SCTP connection. ICE negotiation completes within 10 seconds."
+    },
+    "items": [],
+    "updated": "2026-05-05T04:31:35Z"
+  }
+}

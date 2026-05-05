@@ -1,0 +1,21 @@
+{
+  "vBRIEFInfo": {
+    "version": "0.6",
+    "author": "agent:deft-directive-setup",
+    "description": "E2E tests across WebSocket, TCP, stdio, and browser (Playwright) transports",
+    "created": "2026-05-04T22:58:59Z"
+  },
+  "plan": {
+    "title": "E2E Tests — All Transports",
+    "status": "completed",
+    "narratives": {
+      "Description": "End-to-end tests that exercise the full xumux stack over real I/O — no in-memory mocks. Each test spins up a real server, connects a real client using the corresponding transport adapter, runs the full protocol, and tears down. Scenarios to cover for EACH transport: (1) HELLO/WELCOME handshake completes successfully, (2) bidirectional data exchange on a channel, (3) fragmented large message (>65535 bytes for WebSocket/TCP, appropriately sized for stdio) sent client→server and server→client reassembled correctly, (4) dynamic channel open (OPEN_CHANNEL / CHANNEL_ACK) after handshake, (5) graceful close (CLOSE echo). Transport-specific setup: WebSocket — spawn a ws (npm) WebSocket server on a random port; connect XumuxClient via WebSocketAdapter(new WebSocket(url)). Use ws package on both sides. TCP — net.createServer + net.createConnection; TcpAdapter on both sides; OMUX magic validated. stdio — spawn a child Node.js process with piped stdin/stdout; parent uses StdioAdapter on the child's stdio pipes; child script connects XumuxServer on its own stdin/stdout; OMUX magic validated. Playwright/browser — build a minimal browser bundle of XumuxClient + WebSocketAdapter (using Vite or esbuild), serve it with a static HTTP server, launch a real browser via Playwright, browser connects to the ws server, all 5 scenarios above run in-browser. New task targets: task e2e (run all E2E tests), task e2e:ws, task e2e:tcp, task e2e:stdio, task e2e:browser. E2E tests live in tests/e2e/ (separate directory from unit tests). They are NOT included in the default vitest run (task test) to avoid slowing CI; task e2e runs them via a separate vitest config or directly with vitest --config vitest.e2e.config.ts.",
+      "Traces": "FR-7, FR-8, FR-9, FR-10, FR-11, FR-13, FR-14, FR-15, FR-16, FR-18",
+      "Files": "tests/e2e/websocket.e2e.test.ts, tests/e2e/tcp.e2e.test.ts, tests/e2e/stdio.e2e.test.ts, tests/e2e/browser.e2e.test.ts, tests/e2e/helpers.ts (shared server spin-up/teardown), tests/e2e/child-server.ts (stdio child process script), vitest.e2e.config.ts (new — separate vitest config for E2E), Taskfile.yml (add e2e tasks), package.json (add ws + @playwright/test devDeps)",
+      "NewDevDeps": "ws ^8.x, @types/ws, @playwright/test ^1.x, vite (or esbuild for browser bundle)",
+      "Acceptance": "task e2e exits 0. All 5 protocol scenarios pass on all 4 transports. Playwright test runs in Chromium headless. task test (unit) remains unchanged and fast."
+    },
+    "items": [],
+    "updated": "2026-05-05T03:43:05Z"
+  }
+}

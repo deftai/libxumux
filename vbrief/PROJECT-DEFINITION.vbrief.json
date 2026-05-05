@@ -1,0 +1,25 @@
+{
+  "vBRIEFInfo": {
+    "version": "0.6",
+    "author": "agent:deft-directive-setup",
+    "description": "Project identity gestalt",
+    "created": "2026-05-04T19:37:07Z"
+  },
+  "plan": {
+    "title": "libxumux",
+    "status": "running",
+    "policy": {
+      "allowDirectCommitsToMaster": false
+    },
+    "narratives": {
+      "Overview": "libxumux is a cross-platform TypeScript library targeting both Node.js and web browsers (user-provided runtime).",
+      "TechStack": "Library using TypeScript — isomorphic, no Node.js-specific APIs; must run in both Node.js and web browser environments.",
+      "Strategy": "Use interview for this project",
+      "Quality": "Run task check before every commit. Achieve >= 85% coverage overall + per-module. Store secrets in secrets/ dir.",
+      "ProjectRules": "Library must work in both Node.js and web browsers.",
+      "Branching": "Branch-based workflow (default)",
+      "DeftVersion": "0.20.0"
+    },
+    "items": []
+  }
+}

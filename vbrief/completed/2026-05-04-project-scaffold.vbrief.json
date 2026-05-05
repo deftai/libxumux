@@ -1,0 +1,20 @@
+{
+  "vBRIEFInfo": {
+    "version": "0.6",
+    "author": "agent:deft-directive-setup",
+    "description": "Project scaffold: tsup build, package.json exports map, Vitest config, Taskfile",
+    "created": "2026-05-04T19:41:05Z"
+  },
+  "plan": {
+    "title": "Project Scaffold",
+    "status": "completed",
+    "narratives": {
+      "Description": "Bootstrap the project toolchain. package.json with ESM + CJS dual package exports map (main, module, exports), TypeScript strict config (tsconfig.json), tsup.config.ts with two entry points (src/index.ts and each src/transports/*-adapter.ts) producing dist/esm/ and dist/cjs/ with .d.ts declarations. vitest.config.ts configured for Node.js + browser mode. Taskfile.yml with tasks: build, test, check (lint + typecheck + test), clean, dev. .gitignore covering dist/, node_modules/, coverage/. CHANGELOG.md stub with [Unreleased] section. README.md with install, quick-start, and transport adapter import examples. Includes directive/ Taskfile include so deft tasks are resolvable from project root.",
+      "Traces": "NFR-3, NFR-4, NFR-5, NFR-6",
+      "Files": "package.json, tsconfig.json, tsup.config.ts, vitest.config.ts, Taskfile.yml, .gitignore, CHANGELOG.md, README.md",
+      "Tests": "Verified by: task build succeeds, task test passes with >= 85% coverage baseline on scaffold stubs, TypeScript strict compiles without errors."
+    },
+    "items": [],
+    "updated": "2026-05-04T19:59:42Z"
+  }
+}

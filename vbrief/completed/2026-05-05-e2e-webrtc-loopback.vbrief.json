@@ -1,0 +1,21 @@
+{
+  "vBRIEFInfo": {
+    "version": "0.6",
+    "author": "agent:deft-directive-setup",
+    "description": "E2E: WebRTC loopback mock DataChannel pair — tests WebRTCAdapter glue + xumux protocol, no native deps",
+    "created": "2026-05-05T04:09:24Z"
+  },
+  "plan": {
+    "title": "E2E — WebRTC Loopback Mock DataChannel",
+    "status": "completed",
+    "narratives": {
+      "Description": "Implement an in-memory loopback DataChannel pair that satisfies the DataChannelLike interface used by WebRTCAdapter. The pair wires two DC objects so that dc1.send() fires dc2's 'message' listener and dc2.send() fires dc1's 'message' listener (same semantics as the existing createInMemoryPair() but through the DataChannel event model instead of async queues). Use this pair to run the 5 standard E2E protocol scenarios (handshake, data exchange, fragmentation, dynamic channel, graceful close) over two WebRTCAdapter instances. No native binary dependencies required — pure JavaScript, works on all platforms. New helper: createLoopbackDCPair() → [DataChannelLike, DataChannelLike] in tests/e2e/webrtc-loopback.e2e.test.ts. Add task e2e:webrtc:loopback target to Taskfile.yml. This scope validates that WebRTCAdapter correctly translates the DataChannel event model (onmessage, onclose) into the async-iterable receive() protocol that XumuxClient/XumuxServer consume.",
+      "Traces": "FR-14 (WebRTC DataChannel adapter), NFR-1 (browser-safe)",
+      "Files": "tests/e2e/webrtc-loopback.e2e.test.ts (new), Taskfile.yml (add e2e:webrtc:loopback task)",
+      "NewDevDeps": "None",
+      "Acceptance": "task e2e:webrtc:loopback exits 0. All 5 protocol scenarios pass. No native binary dependencies added."
+    },
+    "items": [],
+    "updated": "2026-05-05T04:25:34Z"
+  }
+}

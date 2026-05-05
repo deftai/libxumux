@@ -1,0 +1,21 @@
+{
+  "vBRIEFInfo": {
+    "version": "0.6",
+    "author": "agent:deft-directive-setup",
+    "description": "E2E: WebRTC Playwright 2-browser — two real browser contexts negotiate WebRTC via in-process signaling relay",
+    "created": "2026-05-05T04:09:24Z"
+  },
+  "plan": {
+    "title": "E2E — WebRTC Playwright (Two-Browser Real ICE)",
+    "status": "pending",
+    "narratives": {
+      "Description": "Highest-fidelity WebRTC E2E: two real Chromium browser contexts negotiate WebRTC with each other using real ICE, real DTLS, and real SCTP. Architecture: (1) Build a browser bundle of libxumux (src/index.ts + src/transports/webrtc-adapter.ts) using Vite or esbuild — output to tests/e2e/browser-bundle/. (2) Start a minimal local HTTP server (e.g. using serve or a tiny http.createServer) to serve the bundle. (3) Start a minimal WebSocket signaling relay server (ws package) on a random port — the two browser pages POST/receive SDP offers, answers, and ICE candidates through it. (4) Launch two Playwright Chromium contexts (or two tabs of the same context). Page A = xumux client (creates RTCPeerConnection, creates DataChannel, generates offer, sends via signaling). Page B = xumux server (receives offer, creates answer, waits for DataChannel via ondatachannel). (5) Once DataChannels are open, each page calls new WebRTCAdapter(dc) and XumuxClient/XumuxServer respectively. (6) Pages run the 5 standard E2E protocol scenarios via page.evaluate() bridge calls. Results are returned to the test via Playwright's page.evaluate return values. Browser bundle must include only browser-safe code (no tcp-adapter, no stdio-adapter imports). Browser tests may require --allow-insecure-localhost or a self-signed DTLS cert for loopback ICE (Chrome may block). Alternative: use webrtc-adapter or chrome://flags/#allow-insecure-localhost. Tasks added: task e2e:webrtc:browser (builds bundle + runs Playwright). Playwright config: playwright.config.ts targeting Chromium headless. CI note: requires Playwright Chromium installed (npx playwright install chromium).",
+      "Traces": "FR-13 (WebSocket adapter, browser), FR-14 (WebRTC DataChannel adapter), NFR-1 (isomorphic browser support)",
+      "Files": "tests/e2e/webrtc-browser.spec.ts (Playwright test, uses @playwright/test), tests/e2e/browser-bundle/build.ts (Vite/esbuild browser bundle script), tests/e2e/signaling-server.ts (tiny ws relay for SDP/ICE), playwright.config.ts (Chromium headless config), Taskfile.yml (add e2e:webrtc:browser task), package.json (already has @playwright/test; add vite if not present)",
+      "NewDevDeps": "vite ^6.x (or esbuild ^0.x) for browser bundle; @playwright/test already installed; npx playwright install chromium required",
+      "Acceptance": "task e2e:webrtc:browser exits 0 in headless Chromium. All 5 protocol scenarios pass in a real browser-to-browser WebRTC session. ICE negotiation completes within 15 seconds. Bundle size under 100 KB gzipped."
+    },
+    "items": [],
+    "updated": "2026-05-05T04:10:50Z"
+  }
+}

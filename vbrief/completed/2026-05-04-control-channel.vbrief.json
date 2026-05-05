@@ -1,0 +1,20 @@
+{
+  "vBRIEFInfo": {
+    "version": "0.6",
+    "author": "agent:deft-directive-setup",
+    "description": "Control channel: all message types, lifecycle state machine, keepalive, graceful close, error surfacing",
+    "created": "2026-05-04T19:41:05Z"
+  },
+  "plan": {
+    "title": "Control Channel & Lifecycle",
+    "status": "completed",
+    "narratives": {
+      "Description": "Implement the xumux control channel (0x00) in src/control/. Typed interfaces for all 10 control message types (HELLO, WELCOME, OPEN_CHANNEL, CHANNEL_ACK, CLOSE_CHANNEL, CHANNEL_REJECT, PING, PONG, CLOSE, ERROR) with JSON/UTF-8 payloads. A lifecycle state machine that handles client role (send HELLO, await WELCOME) and server role (await HELLO, send WELCOME, assign channel IDs). Dynamic channel management: OPEN_CHANNEL → CHANNEL_ACK/REJECT, CLOSE_CHANNEL, ID reuse after close. Keepalive: PING on configurable interval, PONG within timeout or close. Graceful close: CLOSE with reason, await echo, then close transport. Error surfacing: non-fatal errors as events, fatal errors thrown.",
+      "Traces": "FR-6, FR-7, FR-8, FR-9, FR-10, FR-11, FR-19, NFR-2",
+      "Files": "src/control/messages.ts, src/control/codec.ts, src/control/handler.ts, src/control/index.ts",
+      "Tests": "tests/control/codec.test.ts, tests/control/handler.test.ts, tests/control/keepalive.test.ts, tests/control/lifecycle.test.ts"
+    },
+    "items": [],
+    "updated": "2026-05-04T21:20:49Z"
+  }
+}

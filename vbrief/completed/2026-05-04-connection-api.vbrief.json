@@ -1,0 +1,20 @@
+{
+  "vBRIEFInfo": {
+    "version": "0.6",
+    "author": "agent:deft-directive-setup",
+    "description": "XumuxClient, XumuxServer, Channel abstraction (ReadableStream/WritableStream), public API surface",
+    "created": "2026-05-04T19:41:05Z"
+  },
+  "plan": {
+    "title": "Connection API & Channel Abstraction",
+    "status": "completed",
+    "narratives": {
+      "Description": "Implement the public-facing library API. src/channel.ts: a Channel class wrapping { readable: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array> } with channel state tracking (opening, open, closing, closed). src/connection.ts: shared XumuxPeer base class wiring codec, control handler, and transport together; dispatches inbound frames to the correct channel's ReadableStream controller. XumuxClient extends XumuxPeer and initiates the HELLO handshake. XumuxServer extends XumuxPeer and awaits HELLO, responds WELCOME, assigns channel IDs. src/index.ts: re-exports XumuxClient, XumuxServer, Channel, and all types. All types are JSDoc-documented and zero 'any' in public surface.",
+      "Traces": "FR-7, FR-8, FR-18, NFR-1, NFR-2, NFR-7",
+      "Files": "src/channel.ts, src/connection.ts, src/index.ts, src/types.ts",
+      "Tests": "tests/connection/client.test.ts, tests/connection/server.test.ts, tests/connection/round-trip.test.ts, tests/connection/channel.test.ts"
+    },
+    "items": [],
+    "updated": "2026-05-04T21:31:31Z"
+  }
+}
