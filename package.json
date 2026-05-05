@@ -1,0 +1,88 @@
+{
+  "name": "libxumux",
+  "version": "0.1.0",
+  "description": "TypeScript implementation of the xumux transport-agnostic channel multiplexing protocol",
+  "type": "module",
+  "license": "MIT",
+  "author": "Viz",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/deftai/libxumux"
+  },
+  "keywords": [
+    "xumux",
+    "multiplexer",
+    "websocket",
+    "webrtc",
+    "protocol",
+    "channels"
+  ],
+  "sideEffects": false,
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./transports/websocket": {
+      "types": "./dist/transports/websocket-adapter.d.ts",
+      "import": "./dist/transports/websocket-adapter.js",
+      "require": "./dist/transports/websocket-adapter.cjs"
+    },
+    "./transports/webrtc": {
+      "types": "./dist/transports/webrtc-adapter.d.ts",
+      "import": "./dist/transports/webrtc-adapter.js",
+      "require": "./dist/transports/webrtc-adapter.cjs"
+    },
+    "./transports/tcp": {
+      "types": "./dist/transports/tcp-adapter.d.ts",
+      "import": "./dist/transports/tcp-adapter.js",
+      "require": "./dist/transports/tcp-adapter.cjs"
+    },
+    "./transports/stdio": {
+      "types": "./dist/transports/stdio-adapter.d.ts",
+      "import": "./dist/transports/stdio-adapter.js",
+      "require": "./dist/transports/stdio-adapter.cjs"
+    },
+    "./transports/quic": {
+      "types": "./dist/transports/quic-adapter.d.ts",
+      "import": "./dist/transports/quic-adapter.js",
+      "require": "./dist/transports/quic-adapter.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src",
+    "fmt": "prettier --write \"src/**/*.ts\"",
+    "fmt:check": "prettier --check \"src/**/*.ts\""
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "@types/node": "^25.6.0",
+    "@types/ws": "^8.18.1",
+    "@vitest/coverage-v8": "^3.1.0",
+    "eslint": "^9.26.0",
+    "fast-check": "^4.7.0",
+    "node-datachannel": "^0.32.3",
+    "prettier": "^3.5.0",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.0",
+    "typescript-eslint": "^8.32.0",
+    "vitest": "^3.1.0",
+    "ws": "^8.20.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

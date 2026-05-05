@@ -1,0 +1,97 @@
+version: '3'
+
+includes:
+  deft:
+    taskfile: ./directive/Taskfile.yml
+    optional: true
+
+tasks:
+  default:
+    desc: List all available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  build:
+    desc: Build the library (ESM + CJS + .d.ts via tsup)
+    cmds:
+      - npx tsup
+    sources:
+      - src/**/*.ts
+      - tsup.config.ts
+      - tsconfig.json
+    generates:
+      - dist/**/*
+
+  test:
+    desc: Run tests (Vitest)
+    cmds:
+      - npx vitest run
+
+  test:coverage:
+    desc: Run tests with coverage (fails if < 85%)
+    cmds:
+      - npx vitest run --coverage
+
+  typecheck:
+    desc: Type-check without emitting
+    cmds:
+      - npx tsc --noEmit
+
+  lint:
+    desc: Lint source files with ESLint
+    cmds:
+      - npx eslint src
+
+  fmt:
+    desc: Format source files with Prettier
+    cmds:
+      - npx prettier --write "src/**/*.ts"
+
+  fmt:check:
+    desc: Check formatting is clean (no writes)
+    cmds:
+      - npx prettier --check "src/**/*.ts"
+
+  check:
+    desc: Run all pre-commit checks (lint + typecheck + coverage)
+    deps: [lint, typecheck, test:coverage]
+
+  e2e:
+    desc: Run all E2E tests (requires build first)
+    deps: [build]
+    cmds:
+      - npx vitest run --config vitest.e2e.config.ts
+
+  e2e:ws:
+    desc: Run WebSocket E2E tests
+    deps: [build]
+    cmds:
+      - npx vitest run --config vitest.e2e.config.ts tests/e2e/websocket.e2e.test.ts
+
+  e2e:tcp:
+    desc: Run TCP E2E tests
+    deps: [build]
+    cmds:
+      - npx vitest run --config vitest.e2e.config.ts tests/e2e/tcp.e2e.test.ts
+
+  e2e:stdio:
+    desc: Run stdio E2E tests (spawns child process)
+    deps: [build]
+    cmds:
+      - npx vitest run --config vitest.e2e.config.ts tests/e2e/stdio.e2e.test.ts
+
+  e2e:webrtc:loopback:
+    desc: Run WebRTC loopback mock DataChannel E2E tests (no native deps)
+    cmds:
+      - npx vitest run --config vitest.e2e.config.ts tests/e2e/webrtc-loopback.e2e.test.ts
+
+  e2e:webrtc:native:
+    desc: Run WebRTC node-datachannel E2E tests (real DTLS/SCTP loopback, requires node-datachannel)
+    cmds:
+      - npx vitest run --config vitest.e2e.config.ts tests/e2e/webrtc-native.e2e.test.ts
+
+  clean:
+    desc: Remove build artifacts and coverage output
+    cmds:
+      - rm -rf dist coverage
