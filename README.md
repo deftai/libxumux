@@ -2,7 +2,7 @@
 
 TypeScript implementation of the [xumux](https://xumux.org) transport-agnostic channel multiplexing protocol.
 
-> **Status**: In development — implementing xumux v0.1.0-draft
+> **Status**: In development — implementing xumux v0.2.0-draft
 
 ## What is xumux?
 
@@ -65,12 +65,13 @@ task clean          # Remove dist/ and coverage/
 
 ## Protocol
 
-libxumux implements [xumux v0.1.0-draft](https://xumux.org):
+libxumux implements [xumux v0.2.0-draft](https://xumux.org):
 
-- 6-byte binary frame header (channel, type, flags, reserved, length)
-- Extended 8-byte header for large payloads (EXTENDED_LENGTH flag)
-- Fragmentation / reassembly for messages exceeding transport MTU
-- Control channel (0x00) with HELLO/WELCOME handshake, keepalive, graceful close
+- 8-byte fixed binary frame header: `[Channel:2][Type:1][Flags:1][Length:4]`
+- 2-byte channel IDs (up to 65,534 application channels)
+- 4-byte payload length (up to ~4GB per frame)
+- Fragmentation / reassembly for HOL blocking prevention and transport MTU compliance
+- Control channel (0x0000) with HELLO/WELCOME handshake, keepalive, graceful close
 - Dynamic channel lifecycle (OPEN_CHANNEL / CHANNEL_ACK / CLOSE_CHANNEL)
 
 ## License
