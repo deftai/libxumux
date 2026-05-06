@@ -25,7 +25,7 @@ export interface TransportAdapter {
 }
 
 /** xumux protocol version this library targets. */
-export const XUMUX_VERSION = '0.1.0-draft' as const;
+export const XUMUX_VERSION = '0.2.0-draft' as const;
 
 /** OMUX magic bytes sent by stream-oriented transports before the first frame. */
 export const OMUX_MAGIC = new Uint8Array([0x4f, 0x4d, 0x55, 0x58]) as Readonly<Uint8Array>;

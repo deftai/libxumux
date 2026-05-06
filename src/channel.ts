@@ -10,7 +10,7 @@
 
 import type { Frame } from './codec/frame.js';
 import { fragment } from './codec/fragment.js';
-import { MAX_STANDARD_PAYLOAD } from './codec/constants.js';
+import { DEFAULT_MAX_MESSAGE_SIZE } from './codec/constants.js';
 
 /** Channel lifecycle states. */
 export type ChannelState = 'opening' | 'open' | 'closing' | 'closed';
@@ -23,7 +23,7 @@ export type ChannelState = 'opening' | 'open' | 'closing' | 'closed';
  * call `XumuxPeer.closeChannel(channel.id)` to send a `CLOSE_CHANNEL` frame.
  */
 export interface XumuxChannel {
-  /** Numeric channel ID (1-254). */
+  /** Numeric channel ID (1–65534). */
   readonly id: number;
   /** Channel name as requested during HELLO or OPEN_CHANNEL. */
   readonly name: string;
@@ -45,7 +45,7 @@ export interface ChannelController {
 /**
  * Create a new `XumuxChannel` bound to a send function.
  *
- * @param id - Assigned channel ID (1-254).
+ * @param id - Assigned channel ID (1–65534).
  * @param name - Channel name.
  * @param sendFrame - Function that encodes and sends a frame on the connection.
  * @param maxPayloadSize - Max payload per frame (fragments are used above this).
@@ -56,7 +56,7 @@ export function createChannel(
   id: number,
   name: string,
   sendFrame: (frame: Frame) => void,
-  maxPayloadSize: number = MAX_STANDARD_PAYLOAD,
+  maxPayloadSize: number = DEFAULT_MAX_MESSAGE_SIZE,
 ): ChannelController {
   let readableController!: ReadableStreamDefaultController<Uint8Array>;
   let state: ChannelState = 'open';

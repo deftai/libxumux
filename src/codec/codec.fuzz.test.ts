@@ -7,13 +7,12 @@ import * as fc from 'fast-check';
 import { encodeFrame } from './encode-frame.js';
 import { decodeFrame, FrameDecoder } from './decode-frame.js';
 import { getMagicBytes, validateMagicBytes } from './magic.js';
-import { FrameFlags } from './constants.js';
 
 // Arbitraries
-const channelArb = fc.integer({ min: 0, max: 254 });
+const channelArb = fc.integer({ min: 0, max: 0xfffe });
 const typeArb = fc.integer({ min: 0, max: 255 });
-// Flags: only bits 0-2 are valid (EXT, FRAG, FIN); rest reserved
-const flagsArb = fc.integer({ min: 0, max: 7 }).map((f) => f & ~FrameFlags.EXTENDED_LENGTH);
+// Flags: only bits 1-2 are valid (FRAG, FIN); bit 0 and bits 3-7 are reserved
+const flagsArb = fc.integer({ min: 0, max: 7 }).map((f) => f & 0x06);
 const smallPayloadArb = fc.uint8Array({ minLength: 0, maxLength: 512 });
 const largePayloadArb = fc.uint8Array({ minLength: 65536, maxLength: 131072 });
 
@@ -26,7 +25,7 @@ describe('Frame codec round-trip — arbitrary inputs', () => {
         return (
           decoded.channel === channel &&
           decoded.type === type &&
-          decoded.flags === (flags & ~FrameFlags.EXTENDED_LENGTH) &&
+          decoded.flags === flags &&
           decoded.payload.length === payload.length &&
           decoded.payload.every((b, i) => b === payload[i])
         );
@@ -35,17 +34,14 @@ describe('Frame codec round-trip — arbitrary inputs', () => {
     );
   });
 
-  it('encodeFrame → decodeFrame preserves all fields (large payload, extended header)', () => {
+  it('encodeFrame → decodeFrame preserves all fields (large payload)', () => {
     fc.assert(
       fc.property(channelArb, typeArb, largePayloadArb, (channel, type, payload) => {
         const encoded = encodeFrame({ channel, type, flags: 0, payload });
-        // Must use extended header
-        if ((encoded[2]! & FrameFlags.EXTENDED_LENGTH) === 0) return false;
         const decoded = decodeFrame(encoded);
         return (
           decoded.channel === channel &&
           decoded.type === type &&
-          (decoded.flags & FrameFlags.EXTENDED_LENGTH) === 0 && // stripped on decode
           decoded.payload.length === payload.length
         );
       }),
@@ -53,12 +49,11 @@ describe('Frame codec round-trip — arbitrary inputs', () => {
     );
   });
 
-  it('encodeFrame produces correct total length', () => {
+  it('encodeFrame always produces 8-byte header + payload', () => {
     fc.assert(
       fc.property(channelArb, typeArb, smallPayloadArb, (channel, type, payload) => {
         const encoded = encodeFrame({ channel, type, flags: 0, payload });
-        const expectedHeaderSize = payload.length > 65535 ? 8 : 6;
-        return encoded.length === expectedHeaderSize + payload.length;
+        return encoded.length === 8 + payload.length;
       }),
       { numRuns: 500 },
     );
@@ -171,7 +166,7 @@ describe('Mutation safety', () => {
         const decoded = decodeFrame(encoded);
         const originalFirst = decoded.payload[0]!;
         // Corrupt the source buffer
-        encoded[6] = (encoded[6]! ^ 0xff);
+        encoded[8] = (encoded[8]! ^ 0xff);
         // Decoded payload is a slice of the original (view), so it may change.
         // The invariant here is that encodeFrame → decodeFrame completes without throwing.
         return typeof originalFirst === 'number';

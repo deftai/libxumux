@@ -4,8 +4,9 @@ import { encodeFrame } from './encode-frame.js';
 import { FrameFlags } from './constants.js';
 
 describe('decodeFrame', () => {
-  it('decodes a standard frame with no payload', () => {
-    const bytes = new Uint8Array([0x00, 0x01, 0x00, 0x00, 0x00, 0x00]);
+  it('decodes a frame with no payload', () => {
+    // [ch:0x0000][type:0x01][flags:0x00][len:0x00000000]
+    const bytes = new Uint8Array([0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]);
     const frame = decodeFrame(bytes);
     expect(frame.channel).toBe(0);
     expect(frame.type).toBe(1);
@@ -13,7 +14,7 @@ describe('decodeFrame', () => {
     expect(frame.payload).toHaveLength(0);
   });
 
-  it('decodes a standard frame with payload', () => {
+  it('decodes a frame with payload', () => {
     const payload = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
     const bytes = encodeFrame({ channel: 2, type: 0x20, flags: 0, payload });
     const frame = decodeFrame(bytes);
@@ -22,12 +23,17 @@ describe('decodeFrame', () => {
     expect(frame.payload).toEqual(payload);
   });
 
-  it('strips EXTENDED_LENGTH from returned flags', () => {
+  it('decodes a large payload (>65535 bytes)', () => {
     const payload = new Uint8Array(65536);
     const bytes = encodeFrame({ channel: 0, type: 1, flags: 0, payload });
     const frame = decodeFrame(bytes);
-    expect(frame.flags & FrameFlags.EXTENDED_LENGTH).toBe(0); // stripped
     expect(frame.payload).toHaveLength(65536);
+  });
+
+  it('decodes 2-byte channel ID correctly', () => {
+    const bytes = encodeFrame({ channel: 0x1234, type: 0x05, flags: 0, payload: new Uint8Array(0) });
+    const frame = decodeFrame(bytes);
+    expect(frame.channel).toBe(0x1234);
   });
 
   it('round-trips encode→decode', () => {
@@ -44,21 +50,15 @@ describe('decodeFrame', () => {
     expect(decoded.payload).toEqual(original.payload);
   });
 
-  it('throws RangeError on data shorter than 6 bytes', () => {
-    expect(() => decodeFrame(new Uint8Array([0, 1, 2, 3, 4]))).toThrow(RangeError);
-  });
-
-  it('throws RangeError when EXTENDED_LENGTH flag set but only 6 bytes provided', () => {
-    // Byte[2] = 0x01 (EXTENDED_LENGTH) but data is only 6 bytes — need 8
-    const truncated = new Uint8Array([0x00, 0x01, 0x01, 0x00, 0x00, 0x00]);
-    expect(() => decodeFrame(truncated)).toThrow(RangeError);
-    expect(() => decodeFrame(truncated)).toThrow(/incomplete/);
+  it('throws RangeError on data shorter than 8 bytes', () => {
+    expect(() => decodeFrame(new Uint8Array([0, 1, 2, 3, 4, 5, 6]))).toThrow(RangeError);
   });
 
   it('PING test vector (from spec)', () => {
-    const vec = new Uint8Array([0x00, 0x10, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x03, 0xe8]);
+    // 00 00 10 00 00 00 00 04 00 00 03 E8
+    const vec = new Uint8Array([0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x03, 0xe8]);
     const frame = decodeFrame(vec);
-    expect(frame.channel).toBe(0x00);
+    expect(frame.channel).toBe(0x0000);
     expect(frame.type).toBe(0x10);
     expect(frame.payload).toEqual(new Uint8Array([0x00, 0x00, 0x03, 0xe8]));
   });
@@ -67,7 +67,8 @@ describe('decodeFrame', () => {
     // {"version":[0,1,0],"channels":[]} → 34 bytes JSON
     const json = '{"version":[0,1,0],"channels":[]}';
     const payload = new TextEncoder().encode(json);
-    const header = new Uint8Array([0x00, 0x01, 0x00, 0x00, 0x00, 0x22]);
+    // [ch:0x0000][type:0x01][flags:0x00][len:0x00000022]
+    const header = new Uint8Array([0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x22]);
     const vec = new Uint8Array(header.length + payload.length);
     vec.set(header);
     vec.set(payload, header.length);
@@ -92,8 +93,8 @@ describe('FrameDecoder', () => {
   it('handles header split across two pushes', () => {
     const bytes = encodeFrame({ channel: 0, type: 1, flags: 0, payload: new Uint8Array([7, 8]) });
     const decoder = new FrameDecoder();
-    expect(decoder.push(bytes.slice(0, 3))).toHaveLength(0); // partial header
-    expect(decoder.push(bytes.slice(3))).toHaveLength(1);    // rest
+    expect(decoder.push(bytes.slice(0, 4))).toHaveLength(0); // partial header
+    expect(decoder.push(bytes.slice(4))).toHaveLength(1);    // rest
   });
 
   it('handles payload split across multiple pushes', () => {
@@ -128,11 +129,9 @@ describe('FrameDecoder', () => {
     expect(decoder.bufferedBytes).toBe(3);
   });
 
-  it('parses an extended frame from a stream (FrameDecoder handles EXT flag)', () => {
-    // Payload > 65535 forces an extended frame
+  it('parses a large frame from a stream', () => {
     const payload = new Uint8Array(65536).fill(0xab);
     const bytes = encodeFrame({ channel: 1, type: 2, flags: 0, payload });
-    expect(bytes[2]! & FrameFlags.EXTENDED_LENGTH).toBeTruthy(); // sanity check
 
     // Feed into FrameDecoder in chunks
     const decoder = new FrameDecoder();

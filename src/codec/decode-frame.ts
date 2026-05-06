@@ -3,60 +3,40 @@
  * @module codec/decode-frame
  */
 
-import {
-  FrameFlags,
-  STANDARD_HEADER_SIZE,
-  EXTENDED_HEADER_SIZE,
-} from './constants.js';
+import { HEADER_SIZE } from './constants.js';
 import type { Frame } from './frame.js';
 
 /**
  * Parse a single complete frame from its binary wire representation.
  *
- * The EXTENDED_LENGTH flag is stripped from the returned frame's flags field —
- * it is a wire-level encoding detail, not an application-visible flag.
- *
  * @param data - Bytes containing exactly one frame.
  * @throws {RangeError} If the data is too short for a valid frame header.
  */
 export function decodeFrame(data: Uint8Array): Frame {
-  if (data.length < STANDARD_HEADER_SIZE) {
+  if (data.length < HEADER_SIZE) {
     throw new RangeError(
-      `Frame too short: need at least ${STANDARD_HEADER_SIZE} bytes, got ${data.length}`,
+      `Frame too short: need at least ${HEADER_SIZE} bytes, got ${data.length}`,
     );
   }
 
-  // Safe accesses: bounds checked above
-  const channel = data[0] as number;
-  const type = data[1] as number;
-  const wireFlags = data[2] as number;
-  const isExtended = (wireFlags & FrameFlags.EXTENDED_LENGTH) !== 0;
-  const headerSize = isExtended ? EXTENDED_HEADER_SIZE : STANDARD_HEADER_SIZE;
+  // Channel: 2 bytes, big-endian
+  const channel = ((data[0] as number) << 8) | (data[1] as number);
+  const type = data[2] as number;
+  const flags = data[3] as number;
 
-  if (data.length < headerSize) {
-    throw new RangeError(
-      `Extended frame header incomplete: need ${headerSize} bytes, got ${data.length}`,
-    );
-  }
-
-  let payloadLength: number;
-  if (isExtended) {
-    // 4-byte big-endian unsigned integer; >>> 0 ensures unsigned interpretation
-    payloadLength =
-      (((data[4] as number) << 24) |
-        ((data[5] as number) << 16) |
-        ((data[6] as number) << 8) |
-        (data[7] as number)) >>>
-      0;
-  } else {
-    payloadLength = ((data[4] as number) << 8) | (data[5] as number);
-  }
+  // Payload Length: 4 bytes, big-endian unsigned
+  const payloadLength =
+    (((data[4] as number) << 24) |
+      ((data[5] as number) << 16) |
+      ((data[6] as number) << 8) |
+      (data[7] as number)) >>>
+    0;
 
   return {
     channel,
     type,
-    flags: wireFlags & ~FrameFlags.EXTENDED_LENGTH, // strip wire-only flag
-    payload: data.slice(headerSize, headerSize + payloadLength),
+    flags,
+    payload: data.slice(HEADER_SIZE, HEADER_SIZE + payloadLength),
   };
 }
 
@@ -87,27 +67,17 @@ export class FrameDecoder {
     const frames: Uint8Array[] = [];
 
     for (;;) {
-      if (this.buffer.length < STANDARD_HEADER_SIZE) break;
+      if (this.buffer.length < HEADER_SIZE) break;
 
-      const wireFlags = this.buffer[2] as number;
-      const isExtended = (wireFlags & FrameFlags.EXTENDED_LENGTH) !== 0;
-      const headerSize = isExtended ? EXTENDED_HEADER_SIZE : STANDARD_HEADER_SIZE;
+      // Payload Length: 4 bytes, big-endian unsigned (offset 4–7)
+      const payloadLength =
+        (((this.buffer[4] as number) << 24) |
+          ((this.buffer[5] as number) << 16) |
+          ((this.buffer[6] as number) << 8) |
+          (this.buffer[7] as number)) >>>
+        0;
 
-      if (this.buffer.length < headerSize) break;
-
-      let payloadLength: number;
-      if (isExtended) {
-        payloadLength =
-          (((this.buffer[4] as number) << 24) |
-            ((this.buffer[5] as number) << 16) |
-            ((this.buffer[6] as number) << 8) |
-            (this.buffer[7] as number)) >>>
-          0;
-      } else {
-        payloadLength = ((this.buffer[4] as number) << 8) | (this.buffer[5] as number);
-      }
-
-      const totalSize = headerSize + payloadLength;
+      const totalSize = HEADER_SIZE + payloadLength;
       if (this.buffer.length < totalSize) break;
 
       frames.push(this.buffer.slice(0, totalSize));

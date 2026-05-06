@@ -3,7 +3,7 @@ import { XUMUX_VERSION, OMUX_MAGIC } from './types.js';
 
 describe('XUMUX_VERSION', () => {
   it('matches the spec version', () => {
-    expect(XUMUX_VERSION).toBe('0.1.0-draft');
+    expect(XUMUX_VERSION).toBe('0.2.0-draft');
   });
 });
 

@@ -13,14 +13,14 @@ import { decodeFrame } from '../codec/decode-frame.js';
 import { ControlType, CONTROL_CHANNEL } from '../codec/constants.js';
 
 describe('PING encoding', () => {
-  it('produces a 10-byte frame (6 header + 4 payload)', () => {
+  it('produces a 12-byte frame (8 header + 4 payload)', () => {
     const bytes = encodePing(1000);
-    expect(bytes).toHaveLength(10);
+    expect(bytes).toHaveLength(12);
   });
 
   it('matches spec test vector for ts=1000', () => {
-    // 00 10 00 00 00 04 00 00 03 E8
-    const expected = new Uint8Array([0x00, 0x10, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x03, 0xe8]);
+    // 00 00 10 00 00 00 00 04 00 00 03 E8
+    const expected = new Uint8Array([0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x03, 0xe8]);
     expect(encodePing(1000)).toEqual(expected);
   });
 
@@ -35,9 +35,9 @@ describe('PING encoding', () => {
 
 describe('PONG encoding', () => {
   it('matches spec test vector for echo=1000, recv=500', () => {
-    // 00 11 00 00 00 08 00 00 03 E8 00 00 01 F4
+    // 00 00 11 00 00 00 00 08 00 00 03 E8 00 00 01 F4
     const expected = new Uint8Array([
-      0x00, 0x11, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x03, 0xe8, 0x00, 0x00, 0x01, 0xf4,
+      0x00, 0x00, 0x11, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x03, 0xe8, 0x00, 0x00, 0x01, 0xf4,
     ]);
     expect(encodePong(1000, 500)).toEqual(expected);
   });

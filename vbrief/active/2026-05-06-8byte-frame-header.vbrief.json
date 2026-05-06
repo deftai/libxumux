@@ -1,0 +1,20 @@
+{
+  "vBRIEFInfo": {
+    "version": "0.6",
+    "author": "agent:oz",
+    "description": "Upgrade libxumux wire format to the xumux.org 8-byte fixed frame header spec",
+    "created": "2026-05-06T02:59:00Z"
+  },
+  "plan": {
+    "title": "8-Byte Fixed Frame Header Migration",
+    "status": "draft",
+    "narratives": {
+      "Description": "Migrate libxumux from the old 6-byte variable-width frame header to the new xumux.org 8-byte fixed header. The new header layout is [Channel:2][Type:1][Flags:1][Length:4]. Channel field grows from 1 byte to 2 bytes (big-endian, 65,534 app channels). Payload Length is always 4 bytes (max ~4GB), eliminating the EXTENDED_LENGTH flag and variable header size. The Reserved byte is removed. Flags bit 0 is now reserved (was EXTENDED_LENGTH). Fragmentation (FRAGMENT/FRAGMENT_END) is retained. This is a breaking wire format change.",
+      "Decisions": "Strict 8-byte only — no backward compat with old 6-byte frames. Default max fragment size stays 65535 (64KB). Hard remove all deleted public exports (EXTENDED_LENGTH, STANDARD_HEADER_SIZE, EXTENDED_HEADER_SIZE, HEADER_RESERVED_BYTE, MAX_STANDARD_PAYLOAD). XUMUX_VERSION bumped to [0, 2, 0].",
+      "Scope": "constants.ts (remove/replace 5 constants, add HEADER_SIZE), frame.ts (doc update), encode-frame.ts (rewrite encoder for fixed 8-byte header), decode-frame.ts (rewrite decoder + FrameDecoder for fixed 8-byte header), fragment.ts (swap default constant), channel.ts (swap constant, update docs), index.ts (remove stale exports), types.ts (bump version), control/handler.ts (update MAX_CHANNEL_ID refs). All corresponding test files.",
+      "Traces": "xumux.org spec v0.2.0-draft (README.md commit 330f427)"
+    },
+    "items": [],
+    "updated": "2026-05-06T02:59:00Z"
+  }
+}

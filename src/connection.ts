@@ -12,7 +12,7 @@ import type { TransportAdapter } from './types.js';
 import { encodeFrame } from './codec/encode-frame.js';
 import { decodeFrame } from './codec/decode-frame.js';
 import { Reassembler } from './codec/fragment.js';
-import { CONTROL_CHANNEL, CloseCode } from './codec/constants.js';
+import { CONTROL_CHANNEL, CloseCode, MAX_CHANNEL_ID } from './codec/constants.js';
 import type { Frame } from './codec/frame.js';
 import {
   ControlHandler,
@@ -226,7 +226,7 @@ export class XumuxPeer extends EventTarget {
   }
 
   private allocateChannelId(): number | null {
-    for (let id = 1; id <= 254; id++) {
+    for (let id = 1; id <= MAX_CHANNEL_ID; id++) {
       if (!this.channelMap.has(id)) return id;
     }
     return null;
@@ -299,7 +299,7 @@ export class XumuxClient extends XumuxPeer {
     this.startReceiveLoop();
 
     const helloMsg: HelloMessage = {
-      version: [0, 1, 0],
+      version: [0, 2, 0],
       channels: [],
       ...hello,
     };
@@ -350,7 +350,7 @@ export class XumuxServer extends XumuxPeer {
     }
 
     const welcome: WelcomeMessage = {
-      version: [0, 1, 0],
+      version: [0, 2, 0],
       channels: assignedChannels,
       maxMessageSize: hello.maxMessageSize,
       pingInterval: hello.pingInterval,

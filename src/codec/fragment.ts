@@ -7,7 +7,7 @@
  * @module codec/fragment
  */
 
-import { FrameFlags, MAX_STANDARD_PAYLOAD } from './constants.js';
+import { FrameFlags, DEFAULT_MAX_MESSAGE_SIZE } from './constants.js';
 import type { Frame } from './frame.js';
 
 /**
@@ -25,7 +25,7 @@ import type { Frame } from './frame.js';
  */
 export function fragment(
   frame: Frame,
-  maxPayloadSize: number = MAX_STANDARD_PAYLOAD,
+  maxPayloadSize: number = DEFAULT_MAX_MESSAGE_SIZE,
 ): Frame[] {
   if (frame.payload.length <= maxPayloadSize) {
     return [frame];
