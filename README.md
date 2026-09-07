@@ -37,6 +37,22 @@ const { value } = await reader.read();
 console.log(new TextDecoder().decode(value));
 ```
 
+## Architecture / I/O pipeline
+
+Folders map to a Subspace-style stack: **ByteTransport → Framer → Codec → Connection**, with [VROOM](https://github.com/deftai/vroom) (or any app codec) sitting **above** `XumuxChannel` byte streams.
+
+| Layer | Where |
+| --- | --- |
+| ByteTransport | `src/transports/*` (`TransportAdapter`) |
+| Framer / mux codec (frame ↔ bytes) | `src/codec/*` |
+| Control codec | `src/control/*` |
+| Connection + channels | `src/connection.ts`, `src/channel.ts` |
+| VROOM / app messages | out of scope — encode on `channel.readable` / `channel.writable` |
+
+Adapters **attach** to an already-open underlay (they do not dial). `createInMemoryPair()` is the in-process / test analogue of a MessageTransport.
+
+Full mapping, inbound/outbound path, and a layer diagram: [docs/io-stack.md](docs/io-stack.md).
+
 ## Transport adapters
 
 Each transport is a separate entry point — import only what you use:

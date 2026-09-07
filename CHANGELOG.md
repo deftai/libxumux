@@ -18,5 +18,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `STANDARD_HEADER_SIZE`, `EXTENDED_HEADER_SIZE`, `HEADER_RESERVED_BYTE`, `MAX_STANDARD_PAYLOAD` constants
 
 ### Added
+- Architecture / I/O pipeline note (`docs/io-stack.md`) mapping folders to Subspace-style ByteTransport / Framer / Codec / Connection layers, plus a README link
 - `HEADER_SIZE` constant (8)
 - Initial project scaffold (package.json, tsconfig.json, tsup, Vitest, ESLint, Prettier, Taskfile)

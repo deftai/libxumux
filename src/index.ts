@@ -1,6 +1,8 @@
 /**
  * libxumux — TypeScript implementation of the xumux multiplexing protocol.
  *
+ * I/O stack (ByteTransport / Framer / Codec / Connection): see docs/io-stack.md
+ *
  * @see https://xumux.org
  */
 
