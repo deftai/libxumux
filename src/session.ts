@@ -114,7 +114,8 @@ export interface XumuxOptions {
   /**
    * Limits auto-tuning across the connection, in bytes. Default 64 MiB. No window grows once
    * the sum of all channel receive windows would exceed it. Initial windows are always granted,
-   * so the total is at most max(connectionWindow, open channels × initialWindow). Windows don't
+   * even on top of windows that already grew, so the total is at most connectionWindow + open
+   * channels × initialWindow. Windows don't
    * shrink; a channel's window leaves the sum when it closes, though data it received that the
    * application hasn't read yet stays buffered.
    */
