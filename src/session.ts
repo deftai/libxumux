@@ -879,9 +879,12 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     if (!slot.sentClose) {
       slot.closeInfo = { code: msg.code ?? CloseCode.NORMAL, reason: msg.reason, remote: true };
       this.sendCloseChannel(slot, msg.code ?? CloseCode.NORMAL, undefined);
-    } else {
-      this.finishChannel(slot);
     }
+    // Both CLOSE_CHANNELs are now sent (ours at least queued, in order) and received, so the
+    // close is complete (core §5.4). Don't wait for our send to finish: the peer may reuse the
+    // ID at once, and its OPEN_CHANNEL can arrive first. Anything we later send on a reused ID
+    // is queued behind our CLOSE_CHANNEL.
+    this.finishChannel(slot);
   }
 
   private onWindowUpdate(entries: Array<{ channel: number; increment: number }>): void {
@@ -974,12 +977,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
           ? { id: slot.ch.id }
           : { id: slot.ch.id, code, reason },
       ),
-    ).then(
-      () => {
-        if (slot.recvClose) this.finishChannel(slot);
-      },
-      () => undefined,
-    );
+    ).catch(() => undefined); // the close completes when the peer's CLOSE_CHANNEL arrives
   }
 
   /** Close one channel because of a channel-level protocol error. */
