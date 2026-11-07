@@ -1,8 +1,7 @@
 /**
- * xumux control channel — messages, codec, and lifecycle handler.
+ * Control-channel and probe messages.
  * @module control
  */
 
 export * from './messages.js';
 export * from './codec.js';
-export * from './handler.js';

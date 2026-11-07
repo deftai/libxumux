@@ -1,26 +1,16 @@
 /**
- * Core Frame type for the xumux binary protocol.
+ * Core Frame type.
  * @module codec/frame
  */
 
-/**
- * A decoded xumux frame.
- *
- * Channel 0x0000 is always the control channel.
- * Channels 1–65534 (0x0001–0xFFFE) are application channels assigned during HELLO/WELCOME or OPEN_CHANNEL.
- * Channel 0xFFFF is reserved.
- */
+/** A decoded xumux frame. */
 export interface Frame {
-  /** Logical channel ID (0x0000 = control), big-endian on the wire. */
+  /** Channel ID. 0 = control, 0xFFFF reserved. */
   channel: number;
-  /**
-   * Message type byte, scoped to the channel.
-   * On channel 0: see ControlType constants.
-   * On application channels: application-defined.
-   */
+  /** Message type. Control type on channel 0, probe type when PROBE is set, else application-defined. */
   type: number;
-  /** Flags bitfield — FRAGMENT and FRAGMENT_END are the only defined flags. Bit 0 is reserved. */
+  /** Flag bits: MORE (0x01), PROBE (0x02). Others reserved. */
   flags: number;
-  /** Frame payload bytes. */
+  /** Payload bytes. */
   payload: Uint8Array;
 }

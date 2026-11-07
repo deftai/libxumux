@@ -1,12 +1,8 @@
 # libxumux
 
-TypeScript implementation of the [xumux](https://xumux.org) transport-agnostic channel multiplexing protocol.
+TypeScript reference implementation of [xumux](https://github.com/deftai/xumux) **0.2**: named, typed channels with per-channel flow control and probes, over any transport.
 
-> **Status**: In development — implementing xumux v0.2.0-draft
-
-## What is xumux?
-
-xumux lets you run multiple independent typed channels over a single connection — WebSocket, WebRTC DataChannel, TCP, stdio, or QUIC — with a standard binary framing format and handshake.
+> **Status**: implements the xumux 0.2.0-draft core ([spec/core.md](https://github.com/deftai/xumux/blob/main/spec/core.md)) and passes its [conformance vectors](tests/fixtures/xumux-vectors.json). Not yet implemented: the `webrtc-multichannel/1` and `session-resume/1` extensions, and multi-stream QUIC.
 
 ## Install
 
@@ -17,62 +13,102 @@ npm install libxumux
 ## Quick start
 
 ```ts
-import { XumuxClient } from 'libxumux';
+import { XumuxClient, XumuxServer } from 'libxumux';
 import { WebSocketAdapter } from 'libxumux/transports/websocket';
 
-// Connect as client over WebSocket
-const transport = new WebSocketAdapter('wss://example.com/xumux');
-const client = new XumuxClient(transport);
+// Server (Node, with the `ws` package): accept every channel the client asks for.
+wss.on('connection', async (ws) => {
+  const server = new XumuxServer(new WebSocketAdapter(ws), { onChannelRequest: () => true });
+  const { channels } = await server.accept({
+    authorize: (hello) => (hello.auth?.token === secret ? undefined : { code: 4000, reason: 'bad token' }),
+  });
+  for (const ch of channels) {
+    for await (const msg of ch) await ch.send(msg.type, msg.payload); // echo
+  }
+});
 
-// Open a named channel
-const channel = await client.openChannel('my-channel');
+// Client (browser or Node)
+const ws = new WebSocket('wss://example.com/xumux', 'xumux');
+await new Promise((r) => (ws.onopen = r));
+const client = new XumuxClient(new WebSocketAdapter(ws));
+const { channels: [data] } = await client.connect({
+  auth: { token },
+  channels: [{ name: 'data', reliable: true, ordered: true }],
+});
 
-// Write data
-const writer = channel.writable.getWriter();
-await writer.write(new TextEncoder().encode('hello'));
+await data.send(0x01, new TextEncoder().encode('hello')); // type byte + payload
+const reply = await data.receive();                         // { type, payload } | null
+const rtt = await data.ping();                              // round-trip time on this channel, ms
 
-// Read data
-const reader = channel.readable.getReader();
-const { value } = await reader.read();
-console.log(new TextDecoder().decode(value));
+const files = await client.openChannel({ name: 'file', reliable: true, ordered: true, metadata: { path: '/tmp/x' } });
+await files.close();
+await client.close();
 ```
 
-## Transport adapters
+## Concepts
 
-Each transport is a separate entry point — import only what you use:
+- **Messages, not byte streams.** `channel.send(type, payload)` sends one message. The type byte is yours, and large payloads are fragmented and reassembled for you. Read with `await channel.receive()` or `for await (const msg of channel)`.
+- **Backpressure.** `send()` resolves once the frames are handed to the transport. It waits when the peer's flow-control window is used up, or when the transport's buffer is full. Reading a message returns its credit to the sender, so a channel nobody reads from eventually pauses its sender. Other channels are not affected.
+- **Peer-opened channels need a policy.** Pass `onChannelRequest: (req) => true | { code, reason }`. Without it, every channel the peer opens (including HELLO channels on a server) is refused with `1003`. Accepted dynamic channels arrive on the `'channel'` event.
+- **Probes.** `channel.ping()` and `peer.ping()` measure round-trip time. `channel.stats` and `peer.stats` give `{ rtt, srtt, rttvar, probesSent, probesLost }`. Keepalive pings only when the connection is idle (`pingInterval` and `pingTimeout`, in seconds; the server's values apply).
+- **Closing.** `channel.close(code?, reason?)` and `peer.close(code?, reason?)` resolve when the close is complete. `peer.closed` and `channel.closed` are promises. When a channel closes with a code other than `1000`, a pending `receive()` rejects with `XumuxClosedError`.
+- **Events** (`addEventListener`): `'channel'`, `'channel-close'`, `'peer-error'` (the peer sent ERROR) and `'close'`.
+
+### Options
+
+| Option | Default | |
+|---|---|---|
+| `maxFramePayload` | 65536 | Largest frame payload this side accepts |
+| `maxMessageSize` | 262144 | Largest reassembled message this side accepts |
+| `initialWindow` | 262144 | Credit granted per channel (must be ≥ `maxMessageSize`) |
+| `pingInterval` / `pingTimeout` | 30 / 10 s | Keepalive. `pingInterval: 0` disables it |
+| `fragmentSize` | 16384 | Fragment size for fair interleaving between channels |
+| `handshakeTimeoutMs` | 10000 | HELLO timeout (server) / WELCOME timeout (client) |
+| `closeTimeoutMs` | 5000 | How long CLOSE waits for the peer's CLOSE |
+| `onChannelRequest` | refuse | Policy for channels the peer opens |
+
+## Transports
+
+Adapters are plain byte pipes that declare whether they carry whole messages or a byte stream. The session handles magic bytes, framing, size limits and backpressure for all of them.
 
 ```ts
 // Browser + Node.js
-import { WebSocketAdapter } from 'libxumux/transports/websocket';
-import { WebRTCAdapter }   from 'libxumux/transports/webrtc';
-import { QuicAdapter }     from 'libxumux/transports/quic';
+import { WebSocketAdapter } from 'libxumux/transports/websocket'; // subprotocol "xumux"
+import { WebRTCAdapter, XUMUX_DATACHANNEL_INIT } from 'libxumux/transports/webrtc';
+import { QuicAdapter } from 'libxumux/transports/quic';          // experimental
 
 // Node.js only
-import { TcpAdapter }   from 'libxumux/transports/tcp';
+import { TcpAdapter } from 'libxumux/transports/tcp';    // also Unix sockets
 import { StdioAdapter } from 'libxumux/transports/stdio';
+
+// Tests and in-process use
+import { createInMemoryPair } from 'libxumux';
 ```
+
+WebRTC: create the DataChannel with `pc.createDataChannel('xumux', XUMUX_DATACHANNEL_INIT)` on both peers. That sets `negotiated: true, id: 0`.
+
+A custom transport implements `TransportAdapter`: `kind: 'message' | 'stream'`, `send(bytes): void | Promise<void>` (return a promise to apply backpressure), `receive(): AsyncIterable<Uint8Array>` and `close()`.
+
+## Migrating from 0.1
+
+xumux 0.2 is a breaking wire change. See the [spec's change table](https://github.com/deftai/xumux/blob/main/spec/core.md#appendix-a-changes-from-01) and [CHANGELOG.md](CHANGELOG.md). The API changes most code will hit:
+
+- `connect()` and `accept()` return `{ channels: XumuxChannel[], ... }` instead of a `Map`.
+- Channels expose `send(type, payload)` and `receive()` instead of `readable`/`writable` byte streams.
+- Servers must set `onChannelRequest` to accept channels.
+- Transport adapters no longer handle magic bytes or framing; custom adapters must declare `kind`.
 
 ## Development
 
 ```sh
-task build          # Build ESM + CJS + .d.ts
-task test           # Run tests
-task test:coverage  # Run tests + coverage (≥85% required)
-task check          # lint + typecheck + coverage (pre-commit gate)
-task fmt            # Format with Prettier
-task clean          # Remove dist/ and coverage/
+task build          # ESM + CJS + .d.ts
+task test           # unit + conformance tests
+task test:coverage  # with coverage thresholds
+task e2e            # WebSocket, TCP, stdio, WebRTC (needs `task build` first, for stdio)
+task fmt            # Prettier
 ```
 
-## Protocol
-
-libxumux implements [xumux v0.2.0-draft](https://xumux.org):
-
-- 8-byte fixed binary frame header: `[Channel:2][Type:1][Flags:1][Length:4]`
-- 2-byte channel IDs (up to 65,534 application channels)
-- 4-byte payload length (up to ~4GB per frame)
-- Fragmentation / reassembly for HOL blocking prevention and transport MTU compliance
-- Control channel (0x0000) with HELLO/WELCOME handshake, keepalive, graceful close
-- Dynamic channel lifecycle (OPEN_CHANNEL / CHANNEL_ACK / CLOSE_CHANNEL)
+`tests/fixtures/xumux-vectors.json` is copied from [`deftai/xumux/conformance/vectors.json`](https://github.com/deftai/xumux/tree/main/conformance). Update it when the spec changes.
 
 ## License
 

@@ -1,51 +1,27 @@
 /**
- * Child process stdio server for E2E testing.
- * Runs XumuxServer on process.stdin/stdout, echoes data back on all channels.
- * Imports from dist/ (requires `task build` before running E2E tests).
+ * stdio E2E child: XumuxServer on process.stdin/stdout that echoes every message.
+ * Imports from dist/ (run `npm run build` first).
  */
-import { fileURLToPath } from 'url';
-import path from 'path';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const dir = path.dirname(fileURLToPath(import.meta.url));
+const { XumuxServer } = await import(path.join(dir, '../../dist/index.js'));
+const { StdioAdapter } = await import(path.join(dir, '../../dist/transports/stdio-adapter.js'));
 
-// Import from built output (dist/)
-const { XumuxServer } = await import(path.join(__dirname, '../../dist/index.js'));
-const { StdioAdapter } = await import(path.join(__dirname, '../../dist/transports/stdio-adapter.js'));
+const echo = async (ch) => {
+  try {
+    for await (const m of ch) await ch.send(m.type, m.payload);
+  } catch {
+    /* channel closed */
+  }
+};
 
-const transport = new StdioAdapter(process.stdin, process.stdout);
-const server = new XumuxServer(transport, { pingInterval: 0 });
-
-const channels = await server.accept();
-
-// Echo mode: read from each channel and write back
-for (const [, ch] of channels) {
-  const reader = ch.readable.getReader();
-  const writer = ch.writable.getWriter();
-  // Pump in the background
-  (async () => {
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done || !value) break;
-      await writer.write(value);
-    }
-  })().catch(() => {});
-}
-
-// Also handle dynamically opened channels
-server.addEventListener('channel-open', (e) => {
-  const ch = e.detail;
-  const reader = ch.readable.getReader();
-  const writer = ch.writable.getWriter();
-  (async () => {
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done || !value) break;
-      await writer.write(value);
-    }
-  })().catch(() => {});
+const server = new XumuxServer(new StdioAdapter(process.stdin, process.stdout), {
+  pingInterval: 0,
+  onChannelRequest: () => true,
 });
-
-// Server close event — exit
-server.addEventListener('close', () => {
-  process.exit(0);
-});
+server.addEventListener('channel', (e) => void echo(e.detail));
+server.addEventListener('close', () => process.exit(0));
+const { channels } = await server.accept();
+for (const ch of channels) void echo(ch);

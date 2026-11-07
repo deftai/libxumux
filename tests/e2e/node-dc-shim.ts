@@ -5,27 +5,24 @@
  * rather than addEventListener. This shim bridges the gap so WebRTCAdapter
  * can be used with a real WebRTC DataChannel backed by libdatachannel.
  */
-import type NodeDataChannel from 'node-datachannel';
+import type { DataChannel } from 'node-datachannel';
 import type { DataChannelLike } from '../../src/transports/webrtc-adapter.js';
 
-type Listener = (...args: unknown[]) => void;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- dispatches heterogeneous event payloads
+type Listener = (...args: any[]) => void;
 
 /** Wraps a node-datachannel DataChannel as a DataChannelLike. */
 export class NodeDCShim implements DataChannelLike {
   private readonly listeners = new Map<string, Listener[]>();
 
-  constructor(private readonly dc: NodeDataChannel.DataChannel) {
+  constructor(private readonly dc: DataChannel) {
     // Wire native callbacks → internal listener dispatch
     dc.onClosed(() => this.fire('close'));
     dc.onError((err: string) => this.fire('error', new Error(err)));
-    dc.onMessage((msg: Buffer | string) => {
-      let data: Uint8Array;
-      if (Buffer.isBuffer(msg)) {
-        // Avoid shared-pool aliasing — copy into a fresh Uint8Array
-        data = new Uint8Array(msg);
-      } else {
-        data = new TextEncoder().encode(msg);
-      }
+    dc.onMessage((msg: Buffer | ArrayBuffer | string) => {
+      // Binary: copy to avoid Buffer-pool aliasing. Text is passed through as a string,
+      // which the adapter rejects (the binding allows binary messages only).
+      const data: Uint8Array | string = typeof msg === 'string' ? msg : new Uint8Array(msg);
       this.fire('message', { data });
     });
   }
@@ -70,10 +67,7 @@ export class NodeDCShim implements DataChannelLike {
  *
  * @param timeoutMs - Fail if not open within this window (default 10 s).
  */
-export function waitForChannelOpen(
-  dc: NodeDataChannel.DataChannel,
-  timeoutMs = 10_000,
-): Promise<void> {
+export function waitForChannelOpen(dc: DataChannel, timeoutMs = 10_000): Promise<void> {
   if (dc.isOpen()) return Promise.resolve();
   return new Promise<void>((resolve, reject) => {
     const t = setTimeout(
