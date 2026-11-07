@@ -1,0 +1,63 @@
+{
+  "name": "deft-libxumux",
+  "version": "0.2.0",
+  "description": "Alias of libxumux, the TypeScript implementation of the xumux multiplexing protocol.",
+  "type": "module",
+  "main": "./index.cjs",
+  "module": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js",
+      "require": "./index.cjs"
+    },
+    "./transports/websocket": {
+      "types": "./transports/websocket.d.ts",
+      "import": "./transports/websocket.js",
+      "require": "./transports/websocket.cjs"
+    },
+    "./transports/webrtc": {
+      "types": "./transports/webrtc.d.ts",
+      "import": "./transports/webrtc.js",
+      "require": "./transports/webrtc.cjs"
+    },
+    "./transports/tcp": {
+      "types": "./transports/tcp.d.ts",
+      "import": "./transports/tcp.js",
+      "require": "./transports/tcp.cjs"
+    },
+    "./transports/stdio": {
+      "types": "./transports/stdio.d.ts",
+      "import": "./transports/stdio.js",
+      "require": "./transports/stdio.cjs"
+    },
+    "./transports/quic": {
+      "types": "./transports/quic.d.ts",
+      "import": "./transports/quic.js",
+      "require": "./transports/quic.cjs"
+    }
+  },
+  "files": [
+    "index.*",
+    "transports",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "libxumux": "^0.2.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/deftai/libxumux",
+    "directory": "packages/deft-libxumux"
+  },
+  "homepage": "https://github.com/deftai/libxumux",
+  "keywords": [
+    "xumux",
+    "multiplexing",
+    "websocket",
+    "webrtc"
+  ]
+}

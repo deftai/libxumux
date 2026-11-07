@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0] - 2026-11-07
 
+### Packaging
+
+- Published to npm as `libxumux`, and as `deft-libxumux`, an alias package (`packages/deft-libxumux`) that re-exports `libxumux` and its `transports/*` subpaths.
+- Added the MIT `LICENSE` file.
+
 ### xumux 0.2 core (breaking)
 
 Implements the xumux 0.2.0-draft core specification (deftai/xumux `spec/core.md`).
