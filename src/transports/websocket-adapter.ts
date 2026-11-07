@@ -21,7 +21,7 @@ export interface WebSocketLike {
   addEventListener(type: 'message', listener: (event: { data: unknown }) => void): void;
   addEventListener(type: 'close', listener: (event: { code: number }) => void): void;
   addEventListener(type: 'error', listener: (event: unknown) => void): void;
-  removeEventListener?(type: string, listener: (...args: unknown[]) => void): void;
+  removeEventListener?(type: string, listener: (event: never) => void): void;
 }
 
 export interface WebSocketAdapterOptions {
@@ -40,15 +40,23 @@ export class WebSocketAdapter implements TransportAdapter {
   ) {
     this.highWaterMark = options.highWaterMark ?? 1 << 20;
     if ('binaryType' in ws) ws.binaryType = 'arraybuffer';
-    ws.addEventListener('message', (event) => {
+    // Detach once input ends, so a socket the application keeps doesn't retain this adapter.
+    const end = (e?: Error): void => {
+      this.queue.end(e);
+      ws.removeEventListener?.('message', onMessage);
+      ws.removeEventListener?.('close', onEnd);
+      ws.removeEventListener?.('error', onEnd);
+    };
+    const onMessage = (event: { data: unknown }): void => {
       const d = event.data;
       if (d instanceof Uint8Array) this.queue.push(d);
       else if (d instanceof ArrayBuffer) this.queue.push(new Uint8Array(d));
-      else
-        this.queue.end(new XumuxProtocolError(CloseCode.PROTOCOL_ERROR, 'text WebSocket message'));
-    });
-    ws.addEventListener('close', () => this.queue.end());
-    ws.addEventListener('error', () => this.queue.end());
+      else end(new XumuxProtocolError(CloseCode.PROTOCOL_ERROR, 'text WebSocket message'));
+    };
+    const onEnd = (): void => end();
+    ws.addEventListener('message', onMessage);
+    ws.addEventListener('close', onEnd);
+    ws.addEventListener('error', onEnd);
   }
 
   send(data: Uint8Array): void | Promise<void> {

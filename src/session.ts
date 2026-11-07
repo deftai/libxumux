@@ -433,7 +433,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
       pings = slot.pings;
       stats = slot.ch._stats;
     }
-    const token = this.nextToken();
+    const token = this.nextToken(pings);
     stats.probesSent++;
     return new Promise<number>((resolve, reject) => {
       const timer = unref(
@@ -1218,9 +1218,9 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
         }
         if (now - this.lastRx >= intervalMs) {
           this.keepalivePingAt = now;
-          void this.enqueueUrgent(pingFrame(CONTROL_CHANNEL, this.nextToken())).catch(
-            () => undefined,
-          );
+          void this.enqueueUrgent(
+            pingFrame(CONTROL_CHANNEL, this.nextToken(this.controlPings)),
+          ).catch(() => undefined);
         }
       }, tick),
     );
@@ -1238,9 +1238,10 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
   }
 
   /** Microseconds since the session started, mod 2^32, never repeating the previous token. */
-  private nextToken(): number {
+  /** A token that differs from the last one and from every probe still pending in `pending`. */
+  private nextToken(pending?: Map<number, unknown>): number {
     let t = this.nowUs();
-    if (t === this.lastToken) t = (t + 1) >>> 0;
+    while (t === this.lastToken || pending?.has(t)) t = (t + 1) >>> 0;
     this.lastToken = t;
     return t;
   }

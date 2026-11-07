@@ -258,3 +258,38 @@ describe('createInMemoryPair', () => {
     expect((await collect(b.receive())).map((x) => x[0])).toEqual([1]);
   });
 });
+
+describe('review regressions (adapters)', () => {
+  it('QuicAdapter.send rejects when the stream write fails', async () => {
+    const writable = new WritableStream<Uint8Array>({
+      write: () => Promise.reject(new Error('stream reset')),
+    });
+    const q = new QuicAdapter({ readable: new ReadableStream(), writable });
+    await expect(q.send(new Uint8Array([1]))).rejects.toThrow('stream reset');
+  });
+
+  it.each(['websocket', 'webrtc'] as const)(
+    '%s adapter removes its listeners when input ends',
+    (kind) => {
+      const target = new EventTarget();
+      const like = {
+        readyState: kind === 'websocket' ? 1 : 'open',
+        send: () => undefined,
+        close: () => undefined,
+        addEventListener: (t: string, l: (...a: unknown[]) => void) =>
+          target.addEventListener(t, l),
+        removeEventListener: vi.fn((t: string, l: (...a: unknown[]) => void) =>
+          target.removeEventListener(t, l),
+        ),
+      };
+      if (kind === 'websocket') new WebSocketAdapter(like as unknown as WebSocketLike);
+      else new WebRTCAdapter(like as unknown as DataChannelLike);
+      target.dispatchEvent(new Event('close'));
+      expect(like.removeEventListener.mock.calls.map((c) => c[0]).sort()).toEqual([
+        'close',
+        'error',
+        'message',
+      ]);
+    },
+  );
+});

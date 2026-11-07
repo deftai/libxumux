@@ -27,7 +27,8 @@ export class QuicAdapter implements TransportAdapter {
 
   async send(data: Uint8Array): Promise<void> {
     await this.writer.ready;
-    this.writer.write(data).catch(() => undefined);
+    // Awaiting the write surfaces stream errors to the session, which fails the send.
+    await this.writer.write(data);
   }
 
   async *receive(): AsyncIterable<Uint8Array> {

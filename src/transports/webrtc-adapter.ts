@@ -30,7 +30,7 @@ export interface DataChannelLike {
   addEventListener(type: 'message', listener: (event: { data: unknown }) => void): void;
   addEventListener(type: 'close', listener: () => void): void;
   addEventListener(type: 'error', listener: (event: unknown) => void): void;
-  removeEventListener?(type: string, listener: (...args: unknown[]) => void): void;
+  removeEventListener?(type: string, listener: (event: never) => void): void;
 }
 
 export interface WebRTCAdapterOptions {
@@ -49,17 +49,23 @@ export class WebRTCAdapter implements TransportAdapter {
   ) {
     this.highWaterMark = options.highWaterMark ?? 1 << 20;
     if ('binaryType' in dc) dc.binaryType = 'arraybuffer';
-    dc.addEventListener('message', (event) => {
+    // Detach once input ends, so a DataChannel the application keeps doesn't retain this adapter.
+    const end = (e?: Error): void => {
+      this.queue.end(e);
+      dc.removeEventListener?.('message', onMessage);
+      dc.removeEventListener?.('close', onEnd);
+      dc.removeEventListener?.('error', onEnd);
+    };
+    const onMessage = (event: { data: unknown }): void => {
       const d = event.data;
       if (d instanceof Uint8Array) this.queue.push(d);
       else if (d instanceof ArrayBuffer) this.queue.push(new Uint8Array(d));
-      else
-        this.queue.end(
-          new XumuxProtocolError(CloseCode.PROTOCOL_ERROR, 'non-binary DataChannel message'),
-        );
-    });
-    dc.addEventListener('close', () => this.queue.end());
-    dc.addEventListener('error', () => this.queue.end());
+      else end(new XumuxProtocolError(CloseCode.PROTOCOL_ERROR, 'non-binary DataChannel message'));
+    };
+    const onEnd = (): void => end();
+    dc.addEventListener('message', onMessage);
+    dc.addEventListener('close', onEnd);
+    dc.addEventListener('error', onEnd);
   }
 
   send(data: Uint8Array): void | Promise<void> {

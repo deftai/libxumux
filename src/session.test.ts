@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { XumuxClient, XumuxServer, versionsCompatible, type XumuxOptions } from './session.js';
 import { createInMemoryPair } from './transports/in-memory-adapter.js';
 import { CloseCode, ControlType, FrameFlags, ProbeType } from './codec/constants.js';
@@ -652,5 +652,19 @@ describe('review regressions', () => {
     await raw.control(ControlType.CLOSE_CHANNEL);
     await later(10);
     expect(raw.frames.some((f) => f.channel === 1 && f.type === 7)).toBe(false);
+  });
+});
+
+describe('review regressions (probes)', () => {
+  it('concurrent pings get distinct tokens even when the clock does not advance', async () => {
+    const { client } = await pair();
+    const spy = vi.spyOn(performance, 'now').mockReturnValue(performance.now());
+    try {
+      const rtts = await Promise.all([client.ping(), client.ping(), client.ping(), client.ping()]);
+      expect(rtts).toHaveLength(4);
+      expect(client.stats.probesLost).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
