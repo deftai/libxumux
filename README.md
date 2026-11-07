@@ -62,7 +62,7 @@ await client.close();
 | `maxMessageSize` | 262144 | Largest reassembled message this side accepts |
 | `initialWindow` | 262144 | Initial credit granted per channel (must be ≥ `maxMessageSize`) |
 | `maxChannelWindow` | 16 MiB | How far auto-tuning may grow one channel's receive window. Negative, or ≤ `initialWindow`, disables it |
-| `connectionWindow` | 64 MiB | Cap on the sum of all channel receive windows |
+| `connectionWindow` | 64 MiB | Stop growing windows once their sum on the connection reaches this |
 | `pingInterval` / `pingTimeout` | 30 / 10 s | Keepalive. `pingInterval: 0` disables it |
 | `fragmentSize` | 16384 | Fragment size for fair interleaving between channels |
 | `handshakeTimeoutMs` | 10000 | HELLO timeout (server) / WELCOME timeout (client) |
@@ -75,8 +75,9 @@ A channel can have at most one window of data in flight, so with a fixed window 
 
 - When the peer uses a whole window in under two round trips, the window doubles. The extra credit goes out with the next WINDOW_UPDATE.
 - The round-trip time comes from probes. When none has completed yet, one is sent.
-- A channel's window grows up to `maxChannelWindow`, and the sum of all windows stays within `connectionWindow`, so a peer can't make this side buffer more than that.
-- Windows don't shrink. A channel's growth goes back to the budget when it closes.
+- A channel's window grows up to `maxChannelWindow`. No window grows once the sum of all windows would pass `connectionWindow`. Initial windows are always granted, so the total is at most the larger of `connectionWindow` and (open channels × `initialWindow`).
+- Windows don't shrink. A channel's window leaves the total when it closes, though data it received that the application hasn't read yet stays buffered.
+- The round-trip time is re-measured, at most once a second, while growth checks fail. Growth compares against the larger of the smoothed and latest RTT, so a path that gets slower is noticed straight away.
 - `channel.receiveWindow` reports a channel's current window.
 
 This is local policy, with no wire change, so it works with any xumux peer.

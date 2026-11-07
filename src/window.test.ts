@@ -121,4 +121,30 @@ describe('receive-window auto-tuning', () => {
     expect(receiving[0]!.receiveWindow).toBe(DEFAULT_INITIAL_WINDOW);
     await client.close();
   });
+
+  it('re-measures a stale RTT so growth can resume', async () => {
+    // The only RTT sample says 0.001 ms, but the link is 40 ms: every growth check fails
+    // against the stale sample until a fresh probe replaces it.
+    const { client, server, sending, receiving } = await delayedPair(20);
+    const internals = server as unknown as { controlStats: { sample(ms: number): void } };
+    internals.controlStats.sample(0.001);
+    await blast(sending[0]!, receiving[0]!, 32 * 1024 * 1024);
+    expect(receiving[0]!.receiveWindow).toBeGreaterThan(DEFAULT_INITIAL_WINDOW);
+    expect(server.rtt).toBeGreaterThan(1);
+    await client.close();
+  }, 30_000);
+
+  it('rejects invalid window options', () => {
+    const [t] = createInMemoryPair('message');
+    for (const bad of [
+      { connectionWindow: Number.NaN },
+      { connectionWindow: -1 },
+      { connectionWindow: 1.5 },
+      { maxChannelWindow: Number.POSITIVE_INFINITY },
+      { maxChannelWindow: Number('lots') },
+      { initialWindow: Number.NaN },
+    ])
+      expect(() => new XumuxServer(t, bad)).toThrow(RangeError);
+    expect(() => new XumuxServer(t, { maxChannelWindow: -1, connectionWindow: 0 })).not.toThrow();
+  });
 });

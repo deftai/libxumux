@@ -112,9 +112,11 @@ export interface XumuxOptions {
    */
   maxChannelWindow?: number;
   /**
-   * Cap on the sum of all channel receive windows on the connection, in bytes. Default 64 MiB.
-   * Bounds how much a peer can make this side buffer. Initial windows are always granted;
-   * only growth is limited. Windows don't shrink; a channel's growth is released when it closes.
+   * Limits auto-tuning across the connection, in bytes. Default 64 MiB. No window grows once
+   * the sum of all channel receive windows would exceed it. Initial windows are always granted,
+   * so the total is at most max(connectionWindow, open channels × initialWindow). Windows don't
+   * shrink; a channel's window leaves the sum when it closes, though data it received that the
+   * application hasn't read yet stays buffered.
    */
   connectionWindow?: number;
 }
@@ -214,11 +216,23 @@ function resolveLimits(l: Limits): ResolvedLimits {
 
 /** Core §3.4 bounds. Returns an error message, or null if valid. */
 function checkLimits(l: ResolvedLimits): string | null {
+  for (const [name, v] of Object.entries(l))
+    if (!Number.isSafeInteger(v)) return `${name} must be an integer, got ${String(v)}`;
   if (l.maxFramePayload < MIN_MAX_FRAME_PAYLOAD)
     return `maxFramePayload must be ≥ ${MIN_MAX_FRAME_PAYLOAD}`;
   if (l.maxMessageSize < l.maxFramePayload) return 'maxMessageSize must be ≥ maxFramePayload';
   if (l.initialWindow < l.maxMessageSize) return 'initialWindow must be ≥ maxMessageSize';
   if (l.initialWindow > MAX_WINDOW) return 'initialWindow must be ≤ 2^31-1';
+  return null;
+}
+
+/** Auto-tuning options: integers; connectionWindow must not be negative. */
+function checkWindowOptions(o: XumuxOptions): string | null {
+  const { maxChannelWindow: m, connectionWindow: c } = o;
+  if (m !== undefined && !Number.isSafeInteger(m))
+    return `maxChannelWindow must be an integer, got ${String(m)}`;
+  if (c !== undefined && (!Number.isSafeInteger(c) || c < 0))
+    return `connectionWindow must be a non-negative integer, got ${String(c)}`;
   return null;
 }
 
@@ -269,6 +283,8 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
   /** Sum of channel receive windows (the auto-tuning budget). */
   private windowTotal = 0;
   private rttProbing = false;
+  /** When auto-tuning last sent a probe (performance.now() ms). */
+  private rttProbedAt = -Infinity;
 
   // Probes and keepalive
   private readonly epoch = performance.now();
@@ -303,7 +319,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     super();
     this.options = options;
     this.local = resolveLimits(options);
-    const err = checkLimits(this.local);
+    const err = checkLimits(this.local) ?? checkWindowOptions(options);
     if (err) throw new RangeError(err);
     const stream = transport.kind === 'stream';
     const magic = stream && transport.magic !== false;
@@ -523,12 +539,20 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     const elapsed = now - slot.tuneStart;
     slot.tuneStart = now;
     slot.tuneBytes = 0;
-    const srtt = this.controlStats.srtt;
+    // The larger of SRTT and the latest sample: smoothing alone would take several
+    // samples to notice that the path got slower.
+    const { srtt, rtt: latest } = this.controlStats;
     if (srtt === undefined) {
       this.probeRtt();
       return 0;
     }
-    if (elapsed >= 2 * srtt) return 0;
+    const rtt = Math.max(srtt, latest ?? 0);
+    if (elapsed >= 2 * rtt) {
+      // Not window-limited, or the RTT sample is stale (the path got slower).
+      // Refresh it, at most once a second, so growth can resume.
+      if (now - this.rttProbedAt > 1000) this.probeRtt();
+      return 0;
+    }
     const budget = (this.options.connectionWindow ?? DEFAULT_CONNECTION_WINDOW) - this.windowTotal;
     const extra = Math.min(slot.recvWindow, maxChannel - slot.recvWindow, budget);
     if (extra <= 0) return 0;
@@ -546,6 +570,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
   private probeRtt(): void {
     if (this.rttProbing || this.state !== 'open') return;
     this.rttProbing = true;
+    this.rttProbedAt = performance.now();
     this.ping((this.options.pingTimeout ?? DEFAULT_PING_TIMEOUT) * 1000)
       .catch(() => undefined)
       .finally(() => (this.rttProbing = false));
