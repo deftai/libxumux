@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-07
+
+### Packaging
+
+- Published to npm as `libxumux`, and as `deft-libxumux`, an alias package (`packages/deft-libxumux`) that re-exports `libxumux` and its `transports/*` subpaths.
+- Added the MIT `LICENSE` file.
+
 ### xumux 0.2 core (breaking)
 
 Implements the xumux 0.2.0-draft core specification (deftai/xumux `spec/core.md`).
@@ -36,6 +43,7 @@ Implements the xumux 0.2.0-draft core specification (deftai/xumux `spec/core.md`
 - Backpressure from flow control and from the transport (`socket.write()`/`drain`, `bufferedAmount`, `writer.ready`).
 - Keepalive pings only when the connection is idle. A silent peer is closed with 4008.
 - Graceful close flushes queued data first, then waits for the peer's CLOSE.
+- The CLOSE reply is sent even when the peer shuts its write side right after its CLOSE (#5).
 
 #### Transports
 - Adapters are byte pipes with `kind: 'message' | 'stream'`. Magic bytes, framing and size limits moved into the session's `StreamFramer`. This fixes `QuicAdapter`, which previously treated each read chunk as a whole frame.
@@ -60,3 +68,6 @@ Implements the xumux 0.2.0-draft core specification (deftai/xumux `spec/core.md`
 ### Added
 - `HEADER_SIZE` constant (8)
 - Initial project scaffold (package.json, tsconfig.json, tsup, Vitest, ESLint, Prettier, Taskfile)
+
+[Unreleased]: https://github.com/deftai/libxumux/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/deftai/libxumux/releases/tag/v0.2.0
