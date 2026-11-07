@@ -5,6 +5,7 @@ import { CloseCode, ControlType, FrameFlags, ProbeType } from './codec/constants
 import { XumuxClosedError } from './errors.js';
 import type { XumuxChannel } from './channel.js';
 import { rawPair, ctrl, json } from '../tests/raw-peer.js';
+import { encodeFrame } from './codec/encode-frame.js';
 
 const accept = { onChannelRequest: () => true as const };
 const base: XumuxOptions = { pingInterval: 0, closeTimeoutMs: 300, ...accept };
@@ -545,5 +546,111 @@ describe('edge paths', () => {
     void client.connect().catch(() => undefined);
     await expect(client.connect()).rejects.toThrow(/once/);
     await client.close();
+  });
+});
+
+describe('review regressions', () => {
+  const hello = (ch: { id: number; name: string }[] = []) => ({
+    channels: ch.map((c) => ({ ...c, reliable: true, ordered: true })),
+  });
+  const small = { maxFramePayload: 4096, maxMessageSize: 4096, initialWindow: 4096 };
+
+  it('handles frames that arrive in the same read as WELCOME', async () => {
+    const { transport, raw } = rawPair('stream');
+    const client = new XumuxClient(transport, base);
+    const p = client.connect();
+    await raw.control(ControlType.HELLO);
+    const welcome = encodeFrame(ctrl(ControlType.WELCOME, { version: [0, 2, 0] }));
+    const open = encodeFrame(
+      ctrl(ControlType.OPEN_CHANNEL, { id: 2, name: 'srv', reliable: true, ordered: true }),
+    );
+    raw.sendBytes(new Uint8Array([...welcome, ...open]));
+    await p;
+    const ack = await raw.control(ControlType.CHANNEL_ACK);
+    expect(json(ack).id).toBe(2);
+    expect([...client.channels.values()].map((c) => c.name)).toEqual(['srv']);
+  });
+
+  it('does not open channels if the connection ends while the policy decides', async () => {
+    const { transport, raw } = rawPair();
+    const server = new XumuxServer(transport, {
+      ...base,
+      onChannelRequest: () => later(30).then(() => true as const),
+    });
+    const acc = server.accept();
+    raw.send(ctrl(ControlType.HELLO, { version: [0, 2, 0], ...hello([{ id: 1, name: 'd' }]) }));
+    await later(5);
+    raw.transport.close();
+    await expect(acc).rejects.toBeInstanceOf(XumuxClosedError);
+    expect(server.channels.size).toBe(0);
+  });
+
+  it('a channel blocked on credit still closes, and every queued send fails', async () => {
+    const { transport, raw } = rawPair();
+    const client = new XumuxClient(transport, base);
+    const p = client.connect({ channels: [{ name: 'd', reliable: true, ordered: true }] });
+    await raw.awaitHelloSendWelcome(small);
+    const ch = (await p).channels[0]!;
+    const sends = [
+      ch.send(1, new Uint8Array(4096)),
+      ch.send(1, new Uint8Array(4096)),
+      ch.send(1, new Uint8Array(10)),
+    ];
+    await raw.next((f) => f.channel === 1);
+    const closing = ch.close();
+    await raw.control(ControlType.CLOSE_CHANNEL, 2000);
+    raw.send(ctrl(ControlType.CLOSE_CHANNEL, { id: 1 }));
+    expect((await closing).code).toBe(1000);
+    const results = await Promise.allSettled(sends);
+    expect(results.map((r) => r.status)).toEqual(['fulfilled', 'rejected', 'rejected']);
+  });
+
+  it('closes with 4009 when an unacknowledged channel receives more than initialWindow', async () => {
+    const { transport, raw } = rawPair();
+    const client = new XumuxClient(transport, base);
+    const p = client.connect();
+    await raw.awaitHelloSendWelcome();
+    await p;
+    void client.openChannel({ name: 'x', reliable: true, ordered: true }).catch(() => undefined);
+    const id = json(await raw.control(ControlType.OPEN_CHANNEL)).id as number;
+    for (let i = 0; i < 5; i++)
+      raw.send({ channel: id, type: 1, flags: 0, payload: new Uint8Array(65536) });
+    expect(json(await raw.control(ControlType.CLOSE)).code).toBe(CloseCode.FLOW_CONTROL_ERROR);
+  });
+
+  it('keeps the close cause when a frame cannot be decoded', async () => {
+    const { transport, raw } = rawPair();
+    const client = new XumuxClient(transport, base);
+    const p = client.connect();
+    await raw.awaitHelloSendWelcome();
+    await p;
+    raw.sendBytes(new Uint8Array([0, 1, 2]));
+    expect(json(await raw.control(ControlType.CLOSE)).code).toBe(CloseCode.INVALID_MESSAGE);
+    expect((await client.closed).code).toBe(CloseCode.INVALID_MESSAGE);
+  });
+
+  it('drops queued data for a channel the peer closes', async () => {
+    const { transport, raw } = rawPair();
+    const client = new XumuxClient(transport, base);
+    const p = client.connect({ channels: [{ name: 'd', reliable: true, ordered: true }] });
+    await raw.awaitHelloSendWelcome();
+    const ch = (await p).channels[0]!;
+    const t = transport as { send: (d: Uint8Array) => void | Promise<void> };
+    const orig = t.send.bind(transport);
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    t.send = async (d) => {
+      await gate;
+      return orig(d);
+    };
+    void client.ping().catch(() => undefined); // occupies the pump
+    const sent = ch.send(7, te.encode('stale'));
+    raw.send(ctrl(ControlType.CLOSE_CHANNEL, { id: 1 }));
+    await later(10);
+    open();
+    await expect(sent).rejects.toThrow(/closed/);
+    await raw.control(ControlType.CLOSE_CHANNEL);
+    await later(10);
+    expect(raw.frames.some((f) => f.channel === 1 && f.type === 7)).toBe(false);
   });
 });

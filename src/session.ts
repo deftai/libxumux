@@ -168,6 +168,7 @@ interface ChannelSlot {
   unreturned: number;
   reasm: { type: number; parts: Uint8Array[]; size: number } | null;
   held: Frame[];
+  heldBytes: number;
   sendChain: Promise<void>;
   open?: { resolve: (ch: XumuxChannel) => void; reject: (e: Error) => void };
   pings: Map<number, PendingPing>;
@@ -259,6 +260,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
   // Close
   private closeTimer: ReturnType<typeof setTimeout> | null = null;
   private closeInfo: CloseInfo | null = null;
+  private closeSent: Promise<void> | null = null;
   private resolveClosed!: (info: CloseInfo) => void;
   /** Resolves when the connection has closed. */
   readonly closed: Promise<CloseInfo>;
@@ -269,6 +271,8 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     reject: (e: Error) => void;
   } | null = null;
   private receiving = false;
+  /** Client only: frames received after WELCOME but before connect() has processed it. */
+  protected afterHandshake: Frame[] | null = null;
 
   constructor(
     protected readonly transport: TransportAdapter,
@@ -379,9 +383,10 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
       do {
         const end = Math.min(off + chunk, payload.length);
         const piece = payload.subarray(off, end);
+        const closed = (): boolean => slot.sentClose || ch.state !== 'open';
+        if (closed()) throw new Error(`channel ${ch.id} closed while sending`);
         if (reliable) await this.takeCredit(slot, piece.length);
-        if (slot.sentClose || ch.state !== 'open')
-          throw new Error(`channel ${ch.id} closed while sending`);
+        if (closed()) throw new Error(`channel ${ch.id} closed while sending`);
         const flags = end < payload.length ? FrameFlags.MORE : 0;
         await this.enqueueData(ch.id, { channel: ch.id, type, flags, payload: piece });
         off = end;
@@ -400,8 +405,15 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     if (ch.state === 'opening')
       return Promise.reject(new Error('cannot close a channel that is still opening'));
     if (!slot.sentClose) {
-      // Let queued sends go out first, then CLOSE_CHANNEL.
-      void slot.sendChain.then(() => this.sendCloseChannel(slot, code, reason));
+      // Let queued sends go out first, then CLOSE_CHANNEL. A send blocked on credit the peer
+      // never returns must not hold the close forever: after closeTimeoutMs, close anyway
+      // (which fails the blocked sends).
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<void>((r) => (timer = unref(setTimeout(r, this.closeTimeoutMs))));
+      void Promise.race([slot.sendChain, timeout])
+        .then(() => this.sendCloseChannel(slot, code, reason))
+        .catch(() => undefined)
+        .finally(() => clearTimeout(timer));
     }
     return ch.closed;
   }
@@ -500,6 +512,16 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     this.startKeepalive(pingInterval, pingTimeout);
   }
 
+  /** Client: process frames that arrived between WELCOME and the end of connect(). */
+  protected replayAfterHandshake(): void {
+    const frames = this.afterHandshake ?? [];
+    this.afterHandshake = null;
+    for (const f of frames) {
+      if (this.state !== 'open') break;
+      this.handleFrame(f);
+    }
+  }
+
   protected createSlot(
     req: ChannelRequest,
     localOpener: boolean,
@@ -537,6 +559,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
       unreturned: 0,
       reasm: null,
       held: [],
+      heldBytes: 0,
       sendChain: Promise.resolve(),
       pings: new Map(),
     };
@@ -556,9 +579,24 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     slot.sendCredit = this.remote.initialWindow;
     const held = slot.held;
     slot.held = [];
+    slot.heldBytes = 0;
     slot.open?.resolve(slot.ch);
     slot.open = undefined;
     for (const f of held) this.handleFrame(f);
+  }
+
+  /**
+   * Hold a frame that overtook the ACK or WELCOME (core §5.2). The peer may only have sent
+   * up to our initialWindow on the channel, so more than that is a flow-control violation.
+   */
+  private hold(slot: ChannelSlot, f: Frame): void {
+    slot.heldBytes += f.payload.length;
+    if (slot.heldBytes > this.local.initialWindow)
+      throw new XumuxProtocolError(
+        CloseCode.FLOW_CONTROL_ERROR,
+        `peer sent more than initialWindow on channel ${f.channel} before it was acknowledged`,
+      );
+    slot.held.push(f);
   }
 
   /** Drop a locally opened channel that was refused. */
@@ -615,10 +653,17 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
         }
       }
     } catch (e) {
+      // The input can't be parsed any further. fail() queues CLOSE with the right code;
+      // let it reach the wire, then finish with that cause (core §9.1).
       this.fail(e);
+      if (this.state === 'closing') await this.closeSent?.catch(() => undefined);
     }
     if (this.state !== 'closed')
-      this.finishClose({ code: CloseCode.GOING_AWAY, reason: 'transport closed', remote: true });
+      this.finishClose(
+        this.state === 'closing' && this.closeInfo
+          ? this.closeInfo
+          : { code: CloseCode.GOING_AWAY, reason: 'transport closed', remote: true },
+      );
   }
 
   /** Turn an error from frame processing into the right close. */
@@ -685,14 +730,21 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
         expected === ControlType.HELLO ? decodeHello(f.payload) : decodeWelcome(f.payload);
       const w = this.handshakeWaiter;
       this.handshakeWaiter = null;
+      if (this.role === 'client') this.afterHandshake = [];
       w.resolve(msg);
+      return;
+    }
+    // The server may send right after WELCOME (OPEN_CHANNEL, data, probes) and those frames
+    // can arrive in the same read. Keep them until connect() has applied the WELCOME.
+    if (this.afterHandshake) {
+      this.afterHandshake.push(f);
       return;
     }
     // A responder's frames for a channel we opened in HELLO may overtake WELCOME (core §5.2).
     if (this.role === 'client' && f.channel !== CONTROL_CHANNEL) {
       const slot = this.slots.get(f.channel);
       if (slot && slot.ch.state === 'opening') {
-        slot.held.push(f);
+        this.hold(slot, f);
         return;
       }
     }
@@ -711,7 +763,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
       const slot = this.slots.get(f.channel);
       if (!slot) return;
       if (slot.ch.state === 'opening' && slot.ch.localOpener) {
-        slot.held.push(f);
+        this.hold(slot, f);
         return;
       }
       if (slot.ch.state !== 'open' || slot.sentClose) return;
@@ -844,7 +896,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     }
     const ch = slot.ch;
     if (ch.state === 'opening' && ch.localOpener) {
-      slot.held.push(f);
+      this.hold(slot, f);
       return;
     }
     if (ch.state !== 'open' || slot.sentClose) return; // closing: discard (core §5.5)
@@ -898,7 +950,9 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     slot.sentClose = true;
     slot.ch._state = 'closing';
     slot.closeInfo ??= { code, reason, remote: false };
-    this.rejectCredit(slot, new Error(`channel ${slot.ch.id} closed`));
+    const err = new Error(`channel ${slot.ch.id} closed`);
+    this.rejectCredit(slot, err);
+    this.dropQueued(slot.ch.id, err);
     void this.enqueueUrgent(
       closeChannelFrame(
         code === CloseCode.NORMAL && !reason
@@ -942,6 +996,8 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
   // ─── Flow control ───────────────────────────────────────────────────────────
 
   private takeCredit(slot: ChannelSlot, n: number): Promise<void> {
+    if (slot.sentClose || slot.ch.state !== 'open')
+      return Promise.reject(new Error(`channel ${slot.ch.id} closed`));
     if (slot.creditWaiters.length === 0 && slot.sendCredit >= n) {
       slot.sendCredit -= n;
       return Promise.resolve();
@@ -1052,6 +1108,16 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     }
   }
 
+  /** Discard a channel's frames that are still waiting in the outbound queue. */
+  private dropQueued(channel: number, e: unknown): void {
+    const q = this.dataQueues.get(channel);
+    if (!q) return;
+    this.dataQueues.delete(channel);
+    const i = this.rr.indexOf(channel);
+    if (i >= 0) this.rr.splice(i, 1);
+    for (const o of q) o.reject(e);
+  }
+
   private rejectQueued(e: unknown): void {
     for (const o of this.urgent.splice(0)) o.reject(e);
     for (const q of this.dataQueues.values()) for (const o of q.splice(0)) o.reject(e);
@@ -1079,6 +1145,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     this.handshakeWaiter = null;
     const frame = closeFrame(reason ? { code, reason } : { code });
     const sent = this.enqueueUrgent(frame);
+    this.closeSent = sent;
     this.sendingClosed = true;
     this.closeTimer = unref(
       setTimeout(() => this.finishClose(this.closeInfo!), this.closeTimeoutMs),
@@ -1244,6 +1311,7 @@ export class XumuxClient extends XumuxPeer {
       if (answered.size !== ids.length)
         throw protocolError('WELCOME does not answer every HELLO channel');
     } catch (e) {
+      this.afterHandshake = null;
       this.beginCloseFromError(e);
       throw e;
     }
@@ -1262,6 +1330,7 @@ export class XumuxClient extends XumuxPeer {
       this.acceptOpening(slot, a);
       open.push(slot.ch);
     }
+    this.replayAfterHandshake();
     return { welcome, channels: open, rejected: welcome.rejected ?? [] };
   }
 
@@ -1336,6 +1405,9 @@ export class XumuxServer extends XumuxPeer {
         });
       }
     }
+    // The connection may have ended while the policy was deciding.
+    if (this.state !== 'handshaking')
+      throw new XumuxClosedError(CloseCode.GOING_AWAY, 'closed during handshake');
 
     const pingInterval = this.options.pingInterval ?? DEFAULT_PING_INTERVAL;
     const pingTimeout = this.options.pingTimeout ?? DEFAULT_PING_TIMEOUT;
