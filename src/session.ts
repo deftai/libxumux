@@ -336,10 +336,12 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
   async close(code: number = CloseCode.NORMAL, reason?: string): Promise<CloseInfo> {
     if (this.state === 'closed' || this.state === 'closing') return this.closed;
     if (this.state === 'open') {
+      let timer: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([
         this.drain(),
-        new Promise((r) => unref(setTimeout(r, this.closeTimeoutMs))),
+        new Promise((r) => (timer = unref(setTimeout(r, this.closeTimeoutMs)))),
       ]);
+      clearTimeout(timer);
     }
     this.beginClose(code, reason, false);
     return this.closed;
@@ -590,6 +592,16 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
    * up to our initialWindow on the channel, so more than that is a flow-control violation.
    */
   private hold(slot: ChannelSlot, f: Frame): void {
+    if (f.flags & FrameFlags.PROBE) {
+      // Probes never use credit (core §6). Keep a few PINGs to answer once open; drop the
+      // rest, as a receiver may drop PINGs it is not willing to answer (core §8.1).
+      if (
+        f.type === ProbeType.PING &&
+        slot.held.filter((h) => h.flags & FrameFlags.PROBE).length < 8
+      )
+        slot.held.push(f);
+      return;
+    }
     slot.heldBytes += f.payload.length;
     if (slot.heldBytes > this.local.initialWindow)
       throw new XumuxProtocolError(

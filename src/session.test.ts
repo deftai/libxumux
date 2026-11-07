@@ -668,3 +668,28 @@ describe('review regressions (probes)', () => {
     }
   });
 });
+
+describe('review regressions (held probes)', () => {
+  it('probes held before CHANNEL_ACK do not use data credit', async () => {
+    const { transport, raw } = rawPair();
+    const client = new XumuxClient(transport, base);
+    const p = client.connect();
+    await raw.awaitHelloSendWelcome();
+    await p;
+    const opening = client.openChannel({ name: 'x', reliable: true, ordered: true });
+    const id = json(await raw.control(ControlType.OPEN_CHANNEL)).id as number;
+    raw.send({
+      channel: id,
+      type: ProbeType.PING,
+      flags: FrameFlags.PROBE,
+      payload: new Uint8Array([0, 0, 0, 1]),
+    });
+    for (let i = 0; i < 4; i++)
+      raw.send({ channel: id, type: 1, flags: 0, payload: new Uint8Array(65536) });
+    raw.send(ctrl(ControlType.CHANNEL_ACK, { id, reliable: true, ordered: true }));
+    const ch = await opening;
+    expect((await ch.receive())?.payload.length).toBe(65536);
+    expect((await raw.next((f) => f.type === ProbeType.PONG)).channel).toBe(id);
+    expect(client.state).toBe('open');
+  });
+});
