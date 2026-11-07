@@ -189,7 +189,7 @@ interface ChannelSlot {
   pings: Map<number, PendingPing>;
   /** Receive-window auto-tuning: current window, and the measurement in progress. */
   recvWindow: number;
-  tuneStart: number | null;
+  tuneStart: number;
   tuneBytes: number;
 }
 
@@ -515,8 +515,9 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
   private growWindow(slot: ChannelSlot, returned: number): number {
     const maxChannel = this.maxChannelWindow();
     if (maxChannel <= slot.recvWindow || !slot.ch.properties.reliable) return 0;
+    // A measurement starts when a window's worth of credit is granted (channel open, then
+    // after each full window), so it includes receiving the bytes, not only returning them.
     const now = performance.now();
-    slot.tuneStart ??= now;
     slot.tuneBytes += returned;
     if (slot.tuneBytes < slot.recvWindow) return 0;
     const elapsed = now - slot.tuneStart;
@@ -648,7 +649,8 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
       sendChain: Promise.resolve(),
       pings: new Map(),
       recvWindow: this.local.initialWindow,
-      tuneStart: null,
+      // The first measurement starts when the initial window is granted.
+      tuneStart: performance.now(),
       tuneBytes: 0,
     };
     this.windowTotal += slot.recvWindow;

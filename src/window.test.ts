@@ -105,4 +105,20 @@ describe('receive-window auto-tuning', () => {
     expect(server._windowTotal).toBe(0);
     await client.close();
   }, 30_000);
+
+  it('does not grow from a single message without a timed sample', async () => {
+    // SRTT is known and tiny; one message as large as the whole window arrives long after
+    // the channel opened, so the window was not the limit.
+    const { client, server, sending, receiving } = await delayedPair(0);
+    await server.ping();
+    await new Promise((r) => setTimeout(r, 100));
+    await sending[0]!.send(1, new Uint8Array(DEFAULT_INITIAL_WINDOW));
+    for await (const m of receiving[0]!) {
+      expect(m.payload.length).toBe(DEFAULT_INITIAL_WINDOW);
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 20));
+    expect(receiving[0]!.receiveWindow).toBe(DEFAULT_INITIAL_WINDOW);
+    await client.close();
+  });
 });
