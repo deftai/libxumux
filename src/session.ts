@@ -668,8 +668,11 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
       // The input can't be parsed any further. fail() queues CLOSE with the right code;
       // let it reach the wire, then finish with that cause (core §9.1).
       this.fail(e);
-      if (this.state === 'closing') await this.closeSent?.catch(() => undefined);
     }
+    // The input ended. If we are closing (for example the peer sent CLOSE and then
+    // shut its write side), let our CLOSE reach the wire before finishing; the close
+    // timer bounds the wait (core §9.1).
+    if (this.state === 'closing') await this.closeSent?.catch(() => undefined);
     if (this.state !== 'closed')
       this.finishClose(
         this.state === 'closing' && this.closeInfo

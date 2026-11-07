@@ -693,3 +693,44 @@ describe('review regressions (held probes)', () => {
     expect(client.state).toBe('open');
   });
 });
+
+describe('review regressions (close reply)', () => {
+  it('still sends its CLOSE reply when the peer ends its input right after CLOSE', async () => {
+    // A transport whose writes are slow and whose input ends right after the peer's CLOSE,
+    // like a TCP peer that sends CLOSE and then shuts down its write side.
+    const sent: number[] = [];
+    let welcomed!: () => void;
+    const ready = new Promise<void>((r) => (welcomed = r));
+    let closeNow!: () => void;
+    const peerClose = new Promise<void>((r) => (closeNow = r));
+    const transport = {
+      kind: 'message' as const,
+      async send(data: Uint8Array) {
+        const ch = data[0]! * 256 + data[1]!;
+        if (ch === 0) sent.push(data[2]!);
+        if (data[2] === ControlType.HELLO) welcomed();
+        await later(20);
+      },
+      async *receive() {
+        await ready;
+        yield encodeFrame(
+          ctrl(ControlType.WELCOME, {
+            version: [0, 2, 0],
+            channels: [{ id: 1, name: 'd', reliable: true, ordered: true }],
+          }),
+        );
+        await peerClose;
+        yield encodeFrame(ctrl(ControlType.CLOSE, { code: CloseCode.NORMAL }));
+      },
+      close() {},
+    };
+    const client = new XumuxClient(transport, base);
+    const { channels } = await client.connect({
+      channels: [{ name: 'd', reliable: true, ordered: true }],
+    });
+    void channels[0]!.send(1, new Uint8Array(10)).catch(() => undefined); // keep the writer busy
+    closeNow();
+    await client.closed.catch(() => undefined);
+    expect(sent).toContain(ControlType.CLOSE);
+  });
+});
