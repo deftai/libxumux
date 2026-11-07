@@ -17,6 +17,8 @@ import {
   DEFAULT_FRAGMENT_SIZE,
   DEFAULT_HELLO_TIMEOUT_MS,
   DEFAULT_INITIAL_WINDOW,
+  DEFAULT_MAX_CHANNEL_WINDOW,
+  DEFAULT_CONNECTION_WINDOW,
   DEFAULT_MAX_FRAME_PAYLOAD,
   DEFAULT_MAX_MESSAGE_SIZE,
   DEFAULT_PING_INTERVAL,
@@ -102,6 +104,19 @@ export interface XumuxOptions {
   closeTimeoutMs?: number;
   /** Decide on channels the peer opens. Default: reject with 1003. */
   onChannelRequest?: ChannelPolicy;
+  /**
+   * How far receive-window auto-tuning may grow one channel's window, in bytes. Default
+   * 16 MiB. Each channel starts at `initialWindow`; when the peer uses a whole window in under
+   * two round trips (so the window, not the link, limits it), the window doubles. A value at
+   * or below `initialWindow`, or negative, disables auto-tuning.
+   */
+  maxChannelWindow?: number;
+  /**
+   * Cap on the sum of all channel receive windows on the connection, in bytes. Default 64 MiB.
+   * Bounds how much a peer can make this side buffer. Initial windows are always granted;
+   * only growth is limited. Windows don't shrink; a channel's growth is released when it closes.
+   */
+  connectionWindow?: number;
 }
 
 export interface ConnectOptions {
@@ -172,6 +187,10 @@ interface ChannelSlot {
   sendChain: Promise<void>;
   open?: { resolve: (ch: XumuxChannel) => void; reject: (e: Error) => void };
   pings: Map<number, PendingPing>;
+  /** Receive-window auto-tuning: current window, and the measurement in progress. */
+  recvWindow: number;
+  tuneStart: number | null;
+  tuneBytes: number;
 }
 
 interface ResolvedLimits {
@@ -247,6 +266,9 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
 
   // Flow-control credit return
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Sum of channel receive windows (the auto-tuning budget). */
+  private windowTotal = 0;
+  private rttProbing = false;
 
   // Probes and keepalive
   private readonly epoch = performance.now();
@@ -467,6 +489,67 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     else if (!this.flushTimer) this.flushTimer = setTimeout(() => this.flushWindow(), 0);
   }
 
+  /** @internal Current receive window of `ch`. */
+  receiveWindow(ch: XumuxChannel): number {
+    const slot = this.slots.get(ch.id);
+    return slot && slot.ch === ch ? slot.recvWindow : this.local.initialWindow;
+  }
+
+  /** @internal Sum of channel receive windows (for tests). */
+  get _windowTotal(): number {
+    return this.windowTotal;
+  }
+
+  private deleteSlot(slot: ChannelSlot): void {
+    if (this.slots.get(slot.ch.id) !== slot) return;
+    this.slots.delete(slot.ch.id);
+    this.windowTotal -= slot.recvWindow;
+  }
+
+  /**
+   * Receive-window auto-tuning, called as returned credit goes out in a WINDOW_UPDATE.
+   * Returns extra credit to grant on top. A sender held back only by the window delivers
+   * one window per round trip; if a whole window was used in under two smoothed RTTs,
+   * the window doubles, within maxChannelWindow and the connectionWindow budget.
+   */
+  private growWindow(slot: ChannelSlot, returned: number): number {
+    const maxChannel = this.maxChannelWindow();
+    if (maxChannel <= slot.recvWindow || !slot.ch.properties.reliable) return 0;
+    const now = performance.now();
+    slot.tuneStart ??= now;
+    slot.tuneBytes += returned;
+    if (slot.tuneBytes < slot.recvWindow) return 0;
+    const elapsed = now - slot.tuneStart;
+    slot.tuneStart = now;
+    slot.tuneBytes = 0;
+    const srtt = this.controlStats.srtt;
+    if (srtt === undefined) {
+      this.probeRtt();
+      return 0;
+    }
+    if (elapsed >= 2 * srtt) return 0;
+    const budget = (this.options.connectionWindow ?? DEFAULT_CONNECTION_WINDOW) - this.windowTotal;
+    const extra = Math.min(slot.recvWindow, maxChannel - slot.recvWindow, budget);
+    if (extra <= 0) return 0;
+    slot.recvWindow += extra;
+    this.windowTotal += extra;
+    return extra;
+  }
+
+  private maxChannelWindow(): number {
+    const v = this.options.maxChannelWindow ?? DEFAULT_MAX_CHANNEL_WINDOW;
+    return v < 0 ? this.local.initialWindow : Math.min(v, MAX_WINDOW);
+  }
+
+  /** Measure the RTT once, for auto-tuning, when no probe has completed yet. */
+  private probeRtt(): void {
+    if (this.rttProbing || this.state !== 'open') return;
+    this.rttProbing = true;
+    this.ping((this.options.pingTimeout ?? DEFAULT_PING_TIMEOUT) * 1000)
+      .catch(() => undefined)
+      .finally(() => (this.rttProbing = false));
+  }
+
   // ─── Handshake helpers for subclasses ───────────────────────────────────────
 
   /** Start reading from the transport (idempotent). */
@@ -564,7 +647,11 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
       heldBytes: 0,
       sendChain: Promise.resolve(),
       pings: new Map(),
+      recvWindow: this.local.initialWindow,
+      tuneStart: null,
+      tuneBytes: 0,
     };
+    this.windowTotal += slot.recvWindow;
     this.slots.set(req.id, slot);
     return slot;
   }
@@ -613,7 +700,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
 
   /** Drop a locally opened channel that was refused. */
   protected refuseOpening(slot: ChannelSlot, refusal: ChannelRefusal): void {
-    this.slots.delete(slot.ch.id);
+    this.deleteSlot(slot);
     slot.ch._finish({ code: refusal.code, reason: refusal.reason, remote: true });
     slot.open?.reject(new XumuxClosedError(refusal.code, refusal.reason, true));
     slot.open = undefined;
@@ -989,7 +1076,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
 
   private finishChannel(slot: ChannelSlot): void {
     if (slot.ch.state === 'closed') return;
-    this.slots.delete(slot.ch.id);
+    this.deleteSlot(slot);
     this.rejectCredit(slot, new Error(`channel ${slot.ch.id} closed`));
     for (const p of slot.pings.values()) {
       clearTimeout(p.timer);
@@ -1042,8 +1129,9 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     const entries: Array<{ channel: number; increment: number }> = [];
     for (const [id, slot] of this.slots) {
       if (slot.unreturned > 0 && slot.ch.state === 'open' && !slot.sentClose) {
-        entries.push({ channel: id, increment: slot.unreturned });
-        slot.recvCredit += slot.unreturned;
+        const increment = slot.unreturned + this.growWindow(slot, slot.unreturned);
+        entries.push({ channel: id, increment });
+        slot.recvCredit += increment;
         slot.unreturned = 0;
       }
     }

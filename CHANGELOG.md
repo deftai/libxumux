@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Receive-window auto-tuning. A channel's window doubles when the peer uses a whole window in under two round trips, up to `maxChannelWindow` (default 16 MiB). The sum of all windows stays within `connectionWindow` (default 64 MiB). A single channel at 40 ms RTT now runs at more than 4× the 6.6 MB/s that the fixed 256 KiB window allowed. `maxChannelWindow: -1` turns it off.
+- `XumuxChannel.receiveWindow`, and the exported `DEFAULT_MAX_CHANNEL_WINDOW` and `DEFAULT_CONNECTION_WINDOW` constants.
+
 ## [0.2.0] - 2026-11-07
 
 ### Packaging

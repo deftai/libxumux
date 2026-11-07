@@ -78,6 +78,9 @@ export const CONTROL_MAX_PAYLOAD = 65536;
 export const DEFAULT_MAX_FRAME_PAYLOAD = 65536;
 export const DEFAULT_MAX_MESSAGE_SIZE = 262144;
 export const DEFAULT_INITIAL_WINDOW = 262144;
+/** Receive-window auto-tuning bounds: per channel, and the sum over a connection. */
+export const DEFAULT_MAX_CHANNEL_WINDOW = 16 * 1024 * 1024;
+export const DEFAULT_CONNECTION_WINDOW = 64 * 1024 * 1024;
 
 /** Lower / upper bounds for declared limits. */
 export const MIN_MAX_FRAME_PAYLOAD = 4096;
