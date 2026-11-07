@@ -60,12 +60,27 @@ await client.close();
 |---|---|---|
 | `maxFramePayload` | 65536 | Largest frame payload this side accepts |
 | `maxMessageSize` | 262144 | Largest reassembled message this side accepts |
-| `initialWindow` | 262144 | Credit granted per channel (must be ≥ `maxMessageSize`) |
+| `initialWindow` | 262144 | Initial credit granted per channel (must be ≥ `maxMessageSize`) |
+| `maxChannelWindow` | 16 MiB | How far auto-tuning may grow one channel's receive window. Negative, or ≤ `initialWindow`, disables it |
+| `connectionWindow` | 64 MiB | Stop growing windows once their sum on the connection reaches this |
 | `pingInterval` / `pingTimeout` | 30 / 10 s | Keepalive. `pingInterval: 0` disables it |
 | `fragmentSize` | 16384 | Fragment size for fair interleaving between channels |
 | `handshakeTimeoutMs` | 10000 | HELLO timeout (server) / WELCOME timeout (client) |
 | `closeTimeoutMs` | 5000 | How long CLOSE waits for the peer's CLOSE |
 | `onChannelRequest` | refuse | Policy for channels the peer opens |
+
+### Receive windows
+
+A channel can have at most one window of data in flight, so with a fixed window it can't go faster than window ÷ round-trip time. The 256 KiB initial window allows about 2.6 MB/s at 100 ms. To keep long links fast, each side auto-tunes its own receive windows:
+
+- When the peer uses a whole window in under two round trips, the window doubles. The extra credit goes out with the next WINDOW_UPDATE.
+- The round-trip time comes from probes. When none has completed yet, one is sent.
+- A channel's window grows up to `maxChannelWindow`. No window grows once the sum of all windows would pass `connectionWindow`. Initial windows are always granted, so the total is at most the larger of `connectionWindow` and (open channels × `initialWindow`).
+- Windows don't shrink. A channel's window leaves the total when it closes, though data it received that the application hasn't read yet stays buffered.
+- The round-trip time is re-measured, at most once a second, while growth checks fail. Growth compares against the larger of the smoothed and latest RTT, so a path that gets slower is noticed straight away.
+- `channel.receiveWindow` reports a channel's current window.
+
+This is local policy, with no wire change, so it works with any xumux peer.
 
 ## Transports
 

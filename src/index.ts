@@ -40,6 +40,8 @@ export {
   CONTROL_CHANNEL,
   MAX_CHANNEL_ID,
   XMUX_MAGIC,
+  DEFAULT_MAX_CHANNEL_WINDOW,
+  DEFAULT_CONNECTION_WINDOW,
 } from './codec/constants.js';
 export type { Frame } from './codec/frame.js';
 export { encodeFrame } from './codec/encode-frame.js';

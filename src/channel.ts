@@ -41,6 +41,7 @@ export interface ChannelHost {
   closeChannel(ch: XumuxChannel, code: number, reason?: string): Promise<ChannelCloseInfo>;
   pingChannel(channelId: number, timeoutMs: number): Promise<number>;
   consumed(ch: XumuxChannel, bytes: number): void;
+  receiveWindow(ch: XumuxChannel): number;
 }
 
 /** Records RTT samples and loss for one channel (or the connection). */
@@ -119,6 +120,14 @@ export class XumuxChannel implements AsyncIterable<ChannelMessage> {
   /** Effective properties once open; the requested ones while opening. */
   get properties(): ChannelProperties {
     return this._props;
+  }
+
+  /**
+   * Current receive window in bytes: the most this side lets the peer send ahead of what
+   * the application has read. Starts at `initialWindow` and grows with auto-tuning.
+   */
+  get receiveWindow(): number {
+    return this.host.receiveWindow(this);
   }
 
   /** Probe statistics for this channel. */
