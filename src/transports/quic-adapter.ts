@@ -1,49 +1,42 @@
 /**
- * QUIC / WebTransport adapter for xumux.
+ * QUIC / WebTransport bidirectional stream (binding: quic, experimental).
  *
- * Works in browser and Node.js (where WebTransport is available).
- * Magic bytes are NOT sent — the protocol is identified via ALPN or URL.
- *
- * Accepts a pair of `{ readable: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array> }`
- * which matches the WebTransport `datagrams` shape or a bidirectional stream.
+ * Treated as a byte stream: the session parses frames by length, so chunk
+ * boundaries from the stream never matter.
  *
  * @module transports/quic-adapter
  */
 
 import type { TransportAdapter } from '../types.js';
 
-/** Stream pair compatible with WebTransport datagrams or bidirectional streams. */
+/** A WebTransport-style bidirectional stream. */
 export interface StreamPair {
   readonly readable: ReadableStream<Uint8Array>;
   readonly writable: WritableStream<Uint8Array>;
 }
 
-/**
- * xumux transport adapter for QUIC / WebTransport.
- *
- * Provide a `{ readable, writable }` pair from either:
- * - `transport.datagrams` (for datagram mode — note: fragmentation is forbidden on datagrams)
- * - A bidirectional stream opened via `transport.createBidirectionalStream()`
- */
 export class QuicAdapter implements TransportAdapter {
+  /** QUIC streams are byte streams, but the binding sends no magic (ALPN identifies xumux). */
+  readonly kind = 'stream' as const;
+  readonly magic = false;
   private readonly writer: WritableStreamDefaultWriter<Uint8Array>;
 
   constructor(private readonly streams: StreamPair) {
     this.writer = streams.writable.getWriter();
   }
 
-  /** Send a binary frame via the writable stream. */
-  send(data: Uint8Array): void {
-    void this.writer.write(data);
+  async send(data: Uint8Array): Promise<void> {
+    await this.writer.ready;
+    // Awaiting the write surfaces stream errors to the session, which fails the send.
+    await this.writer.write(data);
   }
 
-  /** Receive frames from the readable stream. */
   async *receive(): AsyncIterable<Uint8Array> {
     const reader = this.streams.readable.getReader();
     try {
       for (;;) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) return;
         yield value;
       }
     } finally {
@@ -51,9 +44,7 @@ export class QuicAdapter implements TransportAdapter {
     }
   }
 
-  /** Release writer and close the writable stream. */
   close(): void {
-    void this.writer.close().catch(() => { /* ignore */ });
-    this.writer.releaseLock();
+    this.writer.close().catch(() => undefined);
   }
 }

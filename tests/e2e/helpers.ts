@@ -1,108 +1,85 @@
 /**
  * Shared helpers for E2E tests.
  */
-import type { XumuxClient, XumuxServer } from '../../src/connection.js';
+import type { XumuxClient, XumuxServer, ConnectResult, AcceptResult } from '../../src/session.js';
 import type { XumuxChannel } from '../../src/channel.js';
 
-/** The 5 protocol scenarios every transport E2E test must exercise. */
 export interface E2EScenarioResults {
   handshakeCompleted: boolean;
   dataExchangeWorks: boolean;
   fragmentationWorks: boolean;
   dynamicChannelWorks: boolean;
+  probeWorks: boolean;
   gracefulCloseWorks: boolean;
 }
 
-/**
- * Run the 5 standard E2E protocol scenarios over an already-connected client+server.
- *
- * @param client - Connected XumuxClient (connect() already called)
- * @param server - Connected XumuxServer (accept() already called)
- * @param clientChannels - Channels returned by client.connect()
- * @param serverChannels - Channels returned by server.accept()
- * @param largePayloadSize - Size in bytes for fragmentation test (default 70000, > 65535 for EXT frames)
- */
-export async function runProtocolScenarios(
-  client: XumuxClient,
-  server: XumuxServer,
-  clientChannels: Map<string, XumuxChannel>,
-  serverChannels: Map<string, XumuxChannel>,
-  largePayloadSize = 70_000,
-): Promise<E2EScenarioResults> {
-  const results: E2EScenarioResults = {
-    handshakeCompleted: false,
-    dataExchangeWorks: false,
-    fragmentationWorks: false,
-    dynamicChannelWorks: false,
-    gracefulCloseWorks: false,
-  };
+/** Server options for E2E: accept every channel, no keepalive. */
+export const E2E_OPTIONS = { pingInterval: 0, onChannelRequest: () => true as const };
 
-  // 1. Handshake: checked implicitly — if we're here, it completed
-  results.handshakeCompleted = true;
-
-  // 2. Data exchange on a pre-negotiated channel
-  const clientPipe = clientChannels.get('pipe');
-  const serverPipe = serverChannels.get('pipe');
-  if (clientPipe && serverPipe) {
-    const payload = new TextEncoder().encode('hello E2E');
-    const writer = clientPipe.writable.getWriter();
-    await writer.write(payload);
-    writer.releaseLock();
-
-    const reader = serverPipe.readable.getReader();
-    const { value } = await reader.read();
-    reader.releaseLock();
-
-    results.dataExchangeWorks = new TextDecoder().decode(value) === 'hello E2E';
-  }
-
-  // 3. Fragmentation: send a large message (>65535 bytes for EXT header path)
-  const clientFrag = clientChannels.get('frag');
-  const serverFrag = serverChannels.get('frag');
-  if (clientFrag && serverFrag) {
-    const large = new Uint8Array(largePayloadSize).fill(0xab);
-    const writer = clientFrag.writable.getWriter();
-    await writer.write(large);
-    writer.releaseLock();
-
-    // Read all chunks until we have the full payload
-    const reader = serverFrag.readable.getReader();
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    while (total < largePayloadSize) {
-      const { value, done } = await reader.read();
-      if (done || !value) break;
-      chunks.push(value);
-      total += value.length;
-    }
-    reader.releaseLock();
-
-    const assembled = new Uint8Array(total);
-    let off = 0;
-    for (const chunk of chunks) { assembled.set(chunk, off); off += chunk.length; }
-
-    results.fragmentationWorks = total === largePayloadSize && assembled.every((b) => b === 0xab);
-  }
-
-  // 4. Dynamic channel (OPEN_CHANNEL / CHANNEL_ACK)
-  let dynamicChannelOpenedOnServer = false;
-  server.addEventListener('channel-open', () => { dynamicChannelOpenedOnServer = true; });
-  const dynamicCh = await client.openChannel({ name: 'dynamic', reliable: true, ordered: true });
-  results.dynamicChannelWorks = dynamicCh.name === 'dynamic' && dynamicChannelOpenedOnServer;
-
-  // 5. Graceful close
-  const closeReceived = new Promise<boolean>((resolve) => {
-    server.addEventListener('close', () => resolve(true));
-    setTimeout(() => resolve(false), 5000);
-  });
-  await client.close(1000, 'e2e done');
-  results.gracefulCloseWorks = await closeReceived;
-
-  return results;
-}
-
-/** Default HELLO channel list for E2E tests. */
+/** HELLO channels for E2E tests. */
 export const E2E_CHANNELS = [
   { name: 'pipe', reliable: true, ordered: true },
   { name: 'frag', reliable: true, ordered: true },
 ];
+
+const byName = (chs: XumuxChannel[], name: string): XumuxChannel | undefined =>
+  chs.find((c) => c.name === name);
+
+/** Run the standard scenarios over an already-connected client and server. */
+export async function runProtocolScenarios(
+  client: XumuxClient,
+  server: XumuxServer,
+  c: ConnectResult,
+  s: AcceptResult,
+  largePayloadSize = 200_000,
+): Promise<E2EScenarioResults> {
+  const results: E2EScenarioResults = {
+    handshakeCompleted: c.channels.length === 2 && s.channels.length === 2,
+    dataExchangeWorks: false,
+    fragmentationWorks: false,
+    dynamicChannelWorks: false,
+    probeWorks: false,
+    gracefulCloseWorks: false,
+  };
+
+  const [cp, sp] = [byName(c.channels, 'pipe')!, byName(s.channels, 'pipe')!];
+  await cp.send(0x01, new TextEncoder().encode('hello E2E'));
+  const m = await sp.receive();
+  results.dataExchangeWorks =
+    m?.type === 0x01 && new TextDecoder().decode(m.payload) === 'hello E2E';
+
+  const [cf, sf] = [byName(c.channels, 'frag')!, byName(s.channels, 'frag')!];
+  const large = new Uint8Array(largePayloadSize).map((_, i) => i & 0xff);
+  const sent = cf.send(0x02, large);
+  const big = await sf.receive();
+  await sent;
+  results.fragmentationWorks =
+    big?.payload.length === largePayloadSize && big.payload.every((b, i) => b === (i & 0xff));
+
+  const opened = new Promise<XumuxChannel>((r) =>
+    server.addEventListener('channel', (e) => r((e as CustomEvent<XumuxChannel>).detail)),
+  );
+  const dyn = await client.openChannel({ name: 'dynamic', reliable: true, ordered: true });
+  results.dynamicChannelWorks = (await opened).id === dyn.id && dyn.id % 2 === 1;
+
+  results.probeWorks = (await dyn.ping()) >= 0 && (await client.ping()) >= 0;
+
+  const info = await client.close(1000, 'e2e done');
+  const serverInfo = await server.closed;
+  results.gracefulCloseWorks = info.code === 1000 && serverInfo.code === 1000 && serverInfo.remote;
+  return results;
+}
+
+export function expectAll(
+  r: E2EScenarioResults,
+  expect: (v: unknown) => { toEqual: (x: unknown) => void },
+): void {
+  expect(r).toEqual({
+    handshakeCompleted: true,
+    dataExchangeWorks: true,
+    fragmentationWorks: true,
+    dynamicChannelWorks: true,
+    probeWorks: true,
+    gracefulCloseWorks: true,
+  });
+}

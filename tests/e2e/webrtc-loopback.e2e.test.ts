@@ -12,10 +12,10 @@
  * or real ICE negotiation.
  */
 import { describe, it, expect } from 'vitest';
-import { XumuxClient, XumuxServer } from '../../src/connection.js';
+import { XumuxClient, XumuxServer } from '../../src/session.js';
 import { WebRTCAdapter } from '../../src/transports/webrtc-adapter.js';
 import type { DataChannelLike } from '../../src/transports/webrtc-adapter.js';
-import { runProtocolScenarios, E2E_CHANNELS } from './helpers.js';
+import { runProtocolScenarios, expectAll, E2E_CHANNELS, E2E_OPTIONS } from './helpers.js';
 
 // ─── Loopback DC Pair ─────────────────────────────────────────────────────────
 
@@ -54,7 +54,9 @@ function createLoopbackDCPair(): [DataChannelLike, DataChannelLike] {
   }
 
   const dcA: DataChannelLike = {
-    get readyState() { return closed ? 'closed' : 'open'; },
+    get readyState() {
+      return closed ? 'closed' : 'open';
+    },
     send(data: Uint8Array | ArrayBuffer) {
       if (closed) return;
       const frame = data instanceof Uint8Array ? new Uint8Array(data) : new Uint8Array(data);
@@ -64,21 +66,35 @@ function createLoopbackDCPair(): [DataChannelLike, DataChannelLike] {
       // is sent before closeAll() runs synchronously, and must still be delivered.
       queueMicrotask(() => fire(listenersB, 'message', { data: frame }));
     },
-    close() { closeAll(); },
-    addEventListener(type: string, fn: Listener) { addListener(listenersA, type, fn); },
-    removeEventListener(type: string, fn: Listener) { removeListener(listenersA, type, fn); },
+    close() {
+      closeAll();
+    },
+    addEventListener(type: string, fn: Listener) {
+      addListener(listenersA, type, fn);
+    },
+    removeEventListener(type: string, fn: Listener) {
+      removeListener(listenersA, type, fn);
+    },
   };
 
   const dcB: DataChannelLike = {
-    get readyState() { return closed ? 'closed' : 'open'; },
+    get readyState() {
+      return closed ? 'closed' : 'open';
+    },
     send(data: Uint8Array | ArrayBuffer) {
       if (closed) return;
       const frame = data instanceof Uint8Array ? new Uint8Array(data) : new Uint8Array(data);
       queueMicrotask(() => fire(listenersA, 'message', { data: frame }));
     },
-    close() { closeAll(); },
-    addEventListener(type: string, fn: Listener) { addListener(listenersB, type, fn); },
-    removeEventListener(type: string, fn: Listener) { removeListener(listenersB, type, fn); },
+    close() {
+      closeAll();
+    },
+    addEventListener(type: string, fn: Listener) {
+      addListener(listenersB, type, fn);
+    },
+    removeEventListener(type: string, fn: Listener) {
+      removeListener(listenersB, type, fn);
+    },
   };
 
   return [dcA, dcB];
@@ -94,7 +110,7 @@ describe('WebRTC Loopback DC — all 5 protocol scenarios', () => {
     const serverTransport = new WebRTCAdapter(dcServer);
 
     const client = new XumuxClient(clientTransport, { pingInterval: 0 });
-    const server = new XumuxServer(serverTransport, { pingInterval: 0 });
+    const server = new XumuxServer(serverTransport, E2E_OPTIONS);
 
     const [clientCh, serverCh] = await Promise.all([
       client.connect({ channels: E2E_CHANNELS }),
@@ -103,11 +119,7 @@ describe('WebRTC Loopback DC — all 5 protocol scenarios', () => {
 
     const results = await runProtocolScenarios(client, server, clientCh, serverCh);
 
-    expect(results.handshakeCompleted).toBe(true);
-    expect(results.dataExchangeWorks).toBe(true);
-    expect(results.fragmentationWorks).toBe(true);
-    expect(results.dynamicChannelWorks).toBe(true);
-    expect(results.gracefulCloseWorks).toBe(true);
+    expectAll(results, expect);
   });
 
   it('send() on a closed loopback DC is a no-op (does not throw)', () => {
@@ -139,8 +151,12 @@ describe('WebRTC Loopback DC — all 5 protocol scenarios', () => {
     const framesA: Uint8Array[] = [];
     const framesB: Uint8Array[] = [];
 
-    const doneA = (async () => { for await (const f of adapterA.receive()) framesA.push(f); })();
-    const doneB = (async () => { for await (const f of adapterB.receive()) framesB.push(f); })();
+    const doneA = (async () => {
+      for await (const f of adapterA.receive()) framesA.push(f);
+    })();
+    const doneB = (async () => {
+      for await (const f of adapterB.receive()) framesB.push(f);
+    })();
 
     dcA.close(); // closes both sides
     await Promise.all([doneA, doneB]);

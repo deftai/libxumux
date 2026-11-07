@@ -7,10 +7,10 @@
  */
 import { describe, it, expect, afterAll } from 'vitest';
 import dc from 'node-datachannel';
-import { XumuxClient, XumuxServer } from '../../src/connection.js';
+import { XumuxClient, XumuxServer } from '../../src/session.js';
 import { WebRTCAdapter } from '../../src/transports/webrtc-adapter.js';
 import { NodeDCShim, waitForChannelOpen } from './node-dc-shim.js';
-import { runProtocolScenarios, E2E_CHANNELS } from './helpers.js';
+import { runProtocolScenarios, expectAll, E2E_CHANNELS, E2E_OPTIONS } from './helpers.js';
 
 afterAll(() => {
   // Release native resources (threads, sockets) after all tests complete.
@@ -44,14 +44,11 @@ describe('WebRTC node-datachannel — real DTLS/SCTP — all 5 protocol scenario
         pc2.onDataChannel((channel) => resolve(channel));
       });
 
-      const dc1 = pc1.createDataChannel('omux/control', { protocol: 'x-xumux' });
+      const dc1 = pc1.createDataChannel('xumux', { protocol: 'xumux' });
       const dc2 = await dc2Promise;
 
       // ── Wait for both DataChannels to open ─────────────────────────────────
-      await Promise.all([
-        waitForChannelOpen(dc1),
-        waitForChannelOpen(dc2),
-      ]);
+      await Promise.all([waitForChannelOpen(dc1), waitForChannelOpen(dc2)]);
 
       // ── Wrap with NodeDCShim → WebRTCAdapter ───────────────────────────────
       // Shims are created AFTER open so native callbacks (onMessage, etc.) are
@@ -63,7 +60,7 @@ describe('WebRTC node-datachannel — real DTLS/SCTP — all 5 protocol scenario
       const serverTransport = new WebRTCAdapter(shim2);
 
       const client = new XumuxClient(clientTransport, { pingInterval: 0 });
-      const server = new XumuxServer(serverTransport, { pingInterval: 0 });
+      const server = new XumuxServer(serverTransport, E2E_OPTIONS);
 
       const [clientCh, serverCh] = await Promise.all([
         client.connect({ channels: E2E_CHANNELS }),
@@ -73,15 +70,19 @@ describe('WebRTC node-datachannel — real DTLS/SCTP — all 5 protocol scenario
       // ── Run the 5 standard E2E protocol scenarios ──────────────────────────
       const results = await runProtocolScenarios(client, server, clientCh, serverCh);
 
-      expect(results.handshakeCompleted).toBe(true);
-      expect(results.dataExchangeWorks).toBe(true);
-      expect(results.fragmentationWorks).toBe(true);
-      expect(results.dynamicChannelWorks).toBe(true);
-      expect(results.gracefulCloseWorks).toBe(true);
+      expectAll(results, expect);
     } finally {
       // Always clean up PeerConnections regardless of test outcome
-      try { pc1.close(); } catch { /* ignore */ }
-      try { pc2.close(); } catch { /* ignore */ }
+      try {
+        pc1.close();
+      } catch {
+        /* ignore */
+      }
+      try {
+        pc2.close();
+      } catch {
+        /* ignore */
+      }
     }
   });
 });

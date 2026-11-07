@@ -52,19 +52,21 @@ describe('encodeFrame', () => {
     expect(bytes[1]).toBe(0x34);
   });
 
-  it('preserves FRAGMENT and FRAGMENT_END flags', () => {
+  it('preserves MORE and PROBE flags', () => {
     const payload = new Uint8Array(8);
-    const flags = FrameFlags.FRAGMENT | FrameFlags.FRAGMENT_END;
+    const flags = FrameFlags.MORE | FrameFlags.PROBE;
     const bytes = encodeFrame({ channel: 3, type: 2, flags, payload });
-    expect(bytes[3] & FrameFlags.FRAGMENT).toBeTruthy();
-    expect(bytes[3] & FrameFlags.FRAGMENT_END).toBeTruthy();
+    expect(bytes[3] & FrameFlags.MORE).toBeTruthy();
+    expect(bytes[3] & FrameFlags.PROBE).toBeTruthy();
   });
 
   it('PING test vector: channel=0, type=0x10, 4-byte payload 0x000003E8', () => {
     // From spec: 00 00 10 00 00 00 00 04 00 00 03 E8
     const payload = new Uint8Array([0x00, 0x00, 0x03, 0xe8]);
     const bytes = encodeFrame({ channel: 0x00, type: 0x10, flags: 0, payload });
-    const expected = new Uint8Array([0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x03, 0xe8]);
+    const expected = new Uint8Array([
+      0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x03, 0xe8,
+    ]);
     expect(bytes).toEqual(expected);
   });
 });

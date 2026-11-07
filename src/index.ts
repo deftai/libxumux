@@ -1,44 +1,61 @@
 /**
- * libxumux — TypeScript implementation of the xumux multiplexing protocol.
+ * libxumux: TypeScript reference implementation of xumux 0.2.
  *
- * @see https://xumux.org
+ * @see https://github.com/deftai/xumux/blob/main/spec/core.md
  */
 
-// Core types
 export type { TransportAdapter } from './types.js';
-export { XUMUX_VERSION, OMUX_MAGIC } from './types.js';
+export { XUMUX_VERSION } from './types.js';
 
-// Channel
-export type { XumuxChannel, ChannelState } from './channel.js';
+export { XumuxPeer, XumuxClient, XumuxServer, versionsCompatible } from './session.js';
+export type {
+  XumuxOptions,
+  ConnectOptions,
+  ConnectResult,
+  AcceptOptions,
+  AcceptResult,
+  ChannelDecision,
+  ChannelPolicy,
+  CloseInfo,
+  ChannelCloseEventDetail,
+} from './session.js';
 
-// Connection
-export { XumuxClient, XumuxServer, XumuxPeer } from './connection.js';
-export type { XumuxOptions, ChannelOpenEvent, CloseEvent, ErrorEvent } from './connection.js';
+export { XumuxChannel } from './channel.js';
+export type {
+  ChannelState,
+  ChannelMessage,
+  ChannelProperties,
+  ChannelCloseInfo,
+  ProbeStats,
+} from './channel.js';
 
-// Codec (public-facing constants and types)
+export { XumuxProtocolError, XumuxClosedError } from './errors.js';
+
 export {
+  PROTOCOL_VERSION,
   FrameFlags,
   ControlType,
+  ProbeType,
   CloseCode,
   CONTROL_CHANNEL,
   MAX_CHANNEL_ID,
+  XMUX_MAGIC,
 } from './codec/constants.js';
 export type { Frame } from './codec/frame.js';
 export { encodeFrame } from './codec/encode-frame.js';
-export { decodeFrame, FrameDecoder } from './codec/decode-frame.js';
-export { fragment, Reassembler } from './codec/fragment.js';
-export { getMagicBytes, validateMagicBytes } from './codec/magic.js';
+export { decodeFrame, validateFrame, StreamFramer } from './codec/decode-frame.js';
 
-// Control messages
 export type {
+  Version,
   HelloMessage,
   WelcomeMessage,
-  OpenChannelMessage,
-  ChannelAckMessage,
+  ChannelRequest,
+  ChannelAccept,
+  ChannelRefusal,
   CloseChannelMessage,
-  ChannelRejectMessage,
-  PingPayload,
-  PongPayload,
+  WindowUpdateEntry,
   CloseMessage,
   ErrorMessage,
 } from './control/messages.js';
+
+export { createInMemoryPair } from './transports/in-memory-adapter.js';

@@ -6,9 +6,9 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as net from 'node:net';
 import type { AddressInfo } from 'node:net';
-import { XumuxClient, XumuxServer } from '../../src/connection.js';
+import { XumuxClient, XumuxServer } from '../../src/session.js';
 import { TcpAdapter } from '../../src/transports/tcp-adapter.js';
-import { runProtocolScenarios, E2E_CHANNELS } from './helpers.js';
+import { runProtocolScenarios, expectAll, E2E_CHANNELS, E2E_OPTIONS } from './helpers.js';
 
 let tcpServer: net.Server;
 let port: number;
@@ -26,10 +26,13 @@ afterAll(async () => {
 describe('TCP E2E — all 5 protocol scenarios', () => {
   it('completes handshake, data exchange, fragmentation, dynamic channel, and graceful close', async () => {
     // Server side: accept one connection
-    const serverReady = new Promise<{ server: XumuxServer; serverCh: Map<string, import('../../src/channel.js').XumuxChannel> }>((resolve) => {
+    const serverReady = new Promise<{
+      server: XumuxServer;
+      serverCh: import('../../src/session.js').AcceptResult;
+    }>((resolve) => {
       tcpServer.once('connection', (socket) => {
         const transport = new TcpAdapter(socket);
-        const server = new XumuxServer(transport, { pingInterval: 0 });
+        const server = new XumuxServer(transport, E2E_OPTIONS);
         void server.accept().then((serverCh) => {
           resolve({ server, serverCh });
         });
@@ -49,10 +52,6 @@ describe('TCP E2E — all 5 protocol scenarios', () => {
 
     const results = await runProtocolScenarios(client, server, clientCh, serverCh);
 
-    expect(results.handshakeCompleted).toBe(true);
-    expect(results.dataExchangeWorks).toBe(true);
-    expect(results.fragmentationWorks).toBe(true);
-    expect(results.dynamicChannelWorks).toBe(true);
-    expect(results.gracefulCloseWorks).toBe(true);
+    expectAll(results, expect);
   });
 });
