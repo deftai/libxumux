@@ -1,6 +1,6 @@
 {
   "name": "deft-libxumux",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Alias of libxumux, the TypeScript implementation of the xumux multiplexing protocol.",
   "type": "module",
   "main": "./index.cjs",
@@ -45,7 +45,7 @@
     "LICENSE"
   ],
   "dependencies": {
-    "libxumux": "^0.2.0"
+    "libxumux": "^0.3.0"
   },
   "license": "MIT",
   "repository": {

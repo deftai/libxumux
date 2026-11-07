@@ -20,7 +20,8 @@ import { WebSocketAdapter } from 'libxumux/transports/websocket';
 wss.on('connection', async (ws) => {
   const server = new XumuxServer(new WebSocketAdapter(ws), { onChannelRequest: () => true });
   const { channels } = await server.accept({
-    authorize: (hello) => (hello.auth?.token === secret ? undefined : { code: 4000, reason: 'bad token' }),
+    authorize: (hello) =>
+      hello.auth?.token === secret ? undefined : { code: 4000, reason: 'bad token' },
   });
   for (const ch of channels) {
     for await (const msg of ch) await ch.send(msg.type, msg.payload); // echo
@@ -31,16 +32,23 @@ wss.on('connection', async (ws) => {
 const ws = new WebSocket('wss://example.com/xumux', 'xumux');
 await new Promise((r) => (ws.onopen = r));
 const client = new XumuxClient(new WebSocketAdapter(ws));
-const { channels: [data] } = await client.connect({
+const {
+  channels: [data],
+} = await client.connect({
   auth: { token },
   channels: [{ name: 'data', reliable: true, ordered: true }],
 });
 
 await data.send(0x01, new TextEncoder().encode('hello')); // type byte + payload
-const reply = await data.receive();                         // { type, payload } | null
-const rtt = await data.ping();                              // round-trip time on this channel, ms
+const reply = await data.receive(); // { type, payload } | null
+const rtt = await data.ping(); // round-trip time on this channel, ms
 
-const files = await client.openChannel({ name: 'file', reliable: true, ordered: true, metadata: { path: '/tmp/x' } });
+const files = await client.openChannel({
+  name: 'file',
+  reliable: true,
+  ordered: true,
+  metadata: { path: '/tmp/x' },
+});
 await files.close();
 await client.close();
 ```
@@ -56,18 +64,18 @@ await client.close();
 
 ### Options
 
-| Option | Default | |
-|---|---|---|
-| `maxFramePayload` | 65536 | Largest frame payload this side accepts |
-| `maxMessageSize` | 262144 | Largest reassembled message this side accepts |
-| `initialWindow` | 262144 | Initial credit granted per channel (must be ≥ `maxMessageSize`) |
-| `maxChannelWindow` | 16 MiB | How far auto-tuning may grow one channel's receive window. Negative, or ≤ `initialWindow`, disables it |
-| `connectionWindow` | 64 MiB | Stop growing windows once their sum on the connection reaches this |
-| `pingInterval` / `pingTimeout` | 30 / 10 s | Keepalive. `pingInterval: 0` disables it |
-| `fragmentSize` | 16384 | Fragment size for fair interleaving between channels |
-| `handshakeTimeoutMs` | 10000 | HELLO timeout (server) / WELCOME timeout (client) |
-| `closeTimeoutMs` | 5000 | How long CLOSE waits for the peer's CLOSE |
-| `onChannelRequest` | refuse | Policy for channels the peer opens |
+| Option                         | Default   |                                                                                                        |
+| ------------------------------ | --------- | ------------------------------------------------------------------------------------------------------ |
+| `maxFramePayload`              | 65536     | Largest frame payload this side accepts                                                                |
+| `maxMessageSize`               | 262144    | Largest reassembled message this side accepts                                                          |
+| `initialWindow`                | 262144    | Initial credit granted per channel (must be ≥ `maxMessageSize`)                                        |
+| `maxChannelWindow`             | 16 MiB    | How far auto-tuning may grow one channel's receive window. Negative, or ≤ `initialWindow`, disables it |
+| `connectionWindow`             | 64 MiB    | Stop growing windows once their sum on the connection reaches this                                     |
+| `pingInterval` / `pingTimeout` | 30 / 10 s | Keepalive. `pingInterval: 0` disables it                                                               |
+| `fragmentSize`                 | 16384     | Fragment size for fair interleaving between channels                                                   |
+| `handshakeTimeoutMs`           | 10000     | HELLO timeout (server) / WELCOME timeout (client)                                                      |
+| `closeTimeoutMs`               | 5000      | How long CLOSE waits for the peer's CLOSE                                                              |
+| `onChannelRequest`             | refuse    | Policy for channels the peer opens                                                                     |
 
 ### Receive windows
 
@@ -75,7 +83,7 @@ A channel can have at most one window of data in flight, so with a fixed window 
 
 - When the peer uses a whole window in under two round trips, the window doubles. The extra credit goes out with the next WINDOW_UPDATE.
 - The round-trip time comes from probes. When none has completed yet, one is sent.
-- A channel's window grows up to `maxChannelWindow`. No window grows once the sum of all windows would pass `connectionWindow`. Initial windows are always granted, so the total is at most the larger of `connectionWindow` and (open channels × `initialWindow`).
+- A channel's window grows up to `maxChannelWindow`. No window grows once the sum of all windows would pass `connectionWindow`. Initial windows are always granted, even on top of windows that already grew, so the total is at most `connectionWindow` + (open channels × `initialWindow`).
 - Windows don't shrink. A channel's window leaves the total when it closes, though data it received that the application hasn't read yet stays buffered.
 - The round-trip time is re-measured, at most once a second, while growth checks fail. Growth compares against the larger of the smoothed and latest RTT, so a path that gets slower is noticed straight away.
 - `channel.receiveWindow` reports a channel's current window.
@@ -90,10 +98,10 @@ Adapters are plain byte pipes that declare whether they carry whole messages or 
 // Browser + Node.js
 import { WebSocketAdapter } from 'libxumux/transports/websocket'; // subprotocol "xumux"
 import { WebRTCAdapter, XUMUX_DATACHANNEL_INIT } from 'libxumux/transports/webrtc';
-import { QuicAdapter } from 'libxumux/transports/quic';          // experimental
+import { QuicAdapter } from 'libxumux/transports/quic'; // experimental
 
 // Node.js only
-import { TcpAdapter } from 'libxumux/transports/tcp';    // also Unix sockets
+import { TcpAdapter } from 'libxumux/transports/tcp'; // also Unix sockets
 import { StdioAdapter } from 'libxumux/transports/stdio';
 
 // Tests and in-process use

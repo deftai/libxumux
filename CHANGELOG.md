@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-07
+
 ### Added
 
 - Receive-window auto-tuning. A channel's window doubles when the peer uses a whole window in under two round trips, up to `maxChannelWindow` (default 16 MiB). No window grows once the sum of all windows would pass `connectionWindow` (default 64 MiB). A single channel at 40 ms RTT now runs at more than 4× the 6.6 MB/s that the fixed 256 KiB window allowed. `maxChannelWindow: -1` turns it off.
@@ -87,5 +89,6 @@ Implements the xumux 0.2.0-draft core specification (deftai/xumux `spec/core.md`
 - `HEADER_SIZE` constant (8)
 - Initial project scaffold (package.json, tsconfig.json, tsup, Vitest, ESLint, Prettier, Taskfile)
 
-[Unreleased]: https://github.com/deftai/libxumux/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/deftai/libxumux/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/deftai/libxumux/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/deftai/libxumux/releases/tag/v0.2.0
