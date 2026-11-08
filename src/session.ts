@@ -78,6 +78,7 @@ import {
 } from './channel.js';
 import { XumuxClosedError, XumuxProtocolError } from './errors.js';
 import type { TransportAdapter } from './types.js';
+import { ignore } from './ignore.js';
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
@@ -402,7 +403,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
       return Promise.reject(new XumuxClosedError(CloseCode.CHANNEL_LIMIT, 'no free channel IDs'));
     const slot = this.createSlot({ ...request, id }, true, 'opening');
     const p = new Promise<XumuxChannel>((resolve, reject) => (slot.open = { resolve, reject }));
-    void this.enqueueUrgent(openChannelFrame({ ...request, id })).catch(() => undefined);
+    void this.enqueueUrgent(openChannelFrame({ ...request, id })).catch(ignore);
     return p;
   }
 
@@ -469,7 +470,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
       } while (off < payload.length);
     };
     const p = slot.sendChain.then(run);
-    slot.sendChain = p.catch(() => undefined);
+    slot.sendChain = p.catch(ignore);
     return p;
   }
 
@@ -518,7 +519,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
         reject(abortReason(signal!));
       };
     });
-    aborted.catch(() => undefined);
+    aborted.catch(ignore);
     signal?.addEventListener('abort', onAbort, { once: true });
     const turn = slot.sendChain.then(() => {
       signal?.removeEventListener('abort', onAbort);
@@ -546,7 +547,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
       const timeout = new Promise<void>((r) => (timer = unref(setTimeout(r, this.closeTimeoutMs))));
       void Promise.race([slot.sendChain, timeout])
         .then(() => this.sendCloseChannel(slot, code, reason))
-        .catch(() => undefined)
+        .catch(ignore)
         .finally(() => clearTimeout(timer));
     }
     return ch.closed;
@@ -585,7 +586,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
         reject,
         timer,
       });
-      void this.enqueueUrgent(pingFrame(channelId, token)).catch(() => undefined);
+      void this.enqueueUrgent(pingFrame(channelId, token)).catch(ignore);
     });
   }
 
@@ -666,7 +667,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     this.rttProbing = true;
     this.rttProbedAt = performance.now();
     this.ping((this.options.pingTimeout ?? DEFAULT_PING_TIMEOUT) * 1000)
-      .catch(() => undefined)
+      .catch(ignore)
       .finally(() => (this.rttProbing = false));
   }
 
@@ -880,7 +881,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     // The input ended. If we are closing (for example the peer sent CLOSE and then
     // shut its write side), let our CLOSE reach the wire before finishing; the close
     // timer bounds the wait (core §9.1).
-    if (this.state === 'closing') await this.closeSent?.catch(() => undefined);
+    if (this.state === 'closing') await this.closeSent?.catch(ignore);
     if (this.state !== 'closed')
       this.finishClose(
         this.state === 'closing' && this.closeInfo
@@ -993,7 +994,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
       pings = slot.pings;
     }
     if (f.type === ProbeType.PING) {
-      void this.enqueueUrgent(pongFrame(f.channel, token)).catch(() => undefined);
+      void this.enqueueUrgent(pongFrame(f.channel, token)).catch(ignore);
     } else if (f.type === ProbeType.PONG) {
       const p = pings.get(token);
       if (!p) return;
@@ -1046,7 +1047,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
             code: CloseCode.UNSUPPORTED,
             reason: `unknown control type 0x${f.type.toString(16)}`,
           }),
-        ).catch(() => undefined);
+        ).catch(ignore);
     }
   }
 
@@ -1063,7 +1064,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
           code: CloseCode.CHANNEL_LIMIT,
           reason: 'too many channels',
         }),
-      ).catch(() => undefined);
+      ).catch(ignore);
       return;
     }
     this.pendingRemote.add(req.id);
@@ -1073,12 +1074,12 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
       if (d === true) {
         const props = this.effective(req);
         const slot = this.createSlot(req, false, 'open', props);
-        void this.enqueueUrgent(channelAckFrame(props)).catch(() => undefined);
+        void this.enqueueUrgent(channelAckFrame(props)).catch(ignore);
         this.dispatchEvent(new CustomEvent('channel', { detail: slot.ch }));
       } else {
         void this.enqueueUrgent(
           channelRejectFrame({ id: req.id, code: d.code, reason: d.reason }),
-        ).catch(() => undefined);
+        ).catch(ignore);
       }
     });
   }
@@ -1087,7 +1088,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     if (msg.id === CONTROL_CHANNEL) {
       void this.enqueueUrgent(
         errorFrame({ code: CloseCode.PROTOCOL_ERROR, reason: 'CLOSE_CHANNEL for channel 0' }),
-      ).catch(() => undefined);
+      ).catch(ignore);
       return;
     }
     const slot = this.slots.get(msg.id);
@@ -1127,7 +1128,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     if (!slot) {
       void this.enqueueUrgent(
         errorFrame({ code: CloseCode.CHANNEL_NOT_FOUND, channel: f.channel }),
-      ).catch(() => undefined);
+      ).catch(ignore);
       return;
     }
     const ch = slot.ch;
@@ -1195,7 +1196,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
           ? { id: slot.ch.id }
           : { id: slot.ch.id, code, reason },
       ),
-    ).catch(() => undefined); // the close completes when the peer's CLOSE_CHANNEL arrives
+    ).catch(ignore); // the close completes when the peer's CLOSE_CHANNEL arrives
   }
 
   /** Close one channel because of a channel-level protocol error. */
@@ -1302,9 +1303,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
       }
     }
     for (let i = 0; i < entries.length; i += 10000) {
-      void this.enqueueUrgent(windowUpdateFrame(entries.slice(i, i + 10000))).catch(
-        () => undefined,
-      );
+      void this.enqueueUrgent(windowUpdateFrame(entries.slice(i, i + 10000))).catch(ignore);
     }
   }
 
@@ -1513,7 +1512,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
           this.keepalivePingAt = now;
           void this.enqueueUrgent(
             pingFrame(CONTROL_CHANNEL, this.nextToken(this.controlPings)),
-          ).catch(() => undefined);
+          ).catch(ignore);
         }
       }, tick),
     );
@@ -1585,7 +1584,7 @@ export class XumuxClient extends XumuxPeer {
       ...(opts.auth && { auth: opts.auth }),
     };
     const waiting = this.awaitHandshake();
-    void this.sendControl(helloFrame(hello)).catch(() => undefined);
+    void this.sendControl(helloFrame(hello)).catch(ignore);
     const welcome = (await waiting) as WelcomeMessage;
 
     try {
@@ -1722,7 +1721,7 @@ export class XumuxServer extends XumuxPeer {
       ...(rejected.length && { rejected }),
     };
     const channels = openReqs.map((req, i) => this.createSlot(req, false, 'open', accepted[i]).ch);
-    void this.sendControl(welcomeFrame(welcome)).catch(() => undefined);
+    void this.sendControl(welcomeFrame(welcome)).catch(ignore);
     this.enterOpen(pingInterval, pingTimeout);
     return { hello, channels };
   }

@@ -479,7 +479,7 @@ export class PipeSocket extends Duplex {
 
   private async writeAll(chunk: Uint8Array): Promise<void> {
     const signal = this.writeAbort.signal;
-    for (let off = 0; off < chunk.length; )
+    for (let off = 0; off < chunk.length;)
       off += await this.channel.sendPrefix(PipeMessageType.DATA, chunk.subarray(off), signal);
   }
 

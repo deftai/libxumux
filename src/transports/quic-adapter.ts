@@ -8,6 +8,7 @@
  */
 
 import type { TransportAdapter } from '../types.js';
+import { ignore } from '../ignore.js';
 
 /** A WebTransport-style bidirectional stream. */
 export interface StreamPair {
@@ -45,6 +46,6 @@ export class QuicAdapter implements TransportAdapter {
   }
 
   close(): void {
-    this.writer.close().catch(() => undefined);
+    this.writer.close().catch(ignore);
   }
 }

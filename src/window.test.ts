@@ -93,7 +93,11 @@ describe('receive-window auto-tuning', () => {
     );
     await Promise.all(
       sending.map((ch, i) =>
-        blast(ch, receiving.find((r) => r.id === ch.id)!, 8 * 1024 * 1024 + i),
+        blast(
+          ch,
+          receiving.find((r) => r.id === ch.id)!,
+          8 * 1024 * 1024 + i,
+        ),
       ),
     );
     const total = receiving.reduce((a, c) => a + c.receiveWindow, 0);

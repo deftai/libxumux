@@ -77,18 +77,23 @@
     "@playwright/test": "^1.59.1",
     "@types/node": "^25.6.0",
     "@types/ws": "^8.18.1",
-    "@vitest/coverage-v8": "^3.1.0",
+    "@vitest/coverage-v8": "^5.1.0",
     "eslint": "^9.26.0",
     "fast-check": "^4.7.0",
     "node-datachannel": "^0.32.3",
     "prettier": "^3.5.0",
-    "tsup": "^8.4.0",
+    "tsup": "^9.0.0",
     "typescript": "^5.8.0",
     "typescript-eslint": "^8.32.0",
-    "vitest": "^3.1.0",
+    "vitest": "^5.1.0",
     "ws": "^8.20.0"
   },
   "engines": {
     "node": ">=20.0.0"
+  },
+  "overrides": {
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "^11.0.5"
+    }
   }
 }
