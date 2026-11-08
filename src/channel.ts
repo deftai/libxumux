@@ -69,6 +69,11 @@ export class ProbeStatsRecorder implements ProbeStats {
     }
   }
 
+  /** Forget the RTT estimate (the path changed), keeping the probe counts. */
+  reset(): void {
+    this.rtt = this.srtt = this.rttvar = undefined;
+  }
+
   snapshot(): ProbeStats {
     return {
       rtt: this.rtt,

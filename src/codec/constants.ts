@@ -38,6 +38,36 @@ export const ControlType = {
 export const EXTENSION_CONTROL_TYPE_MIN = 0x30;
 export const EXTENSION_CONTROL_TYPE_MAX = 0x7f;
 
+/** The session-resume/1 extension name (extensions/session-resume.md). */
+export const SESSION_RESUME = 'session-resume/1';
+
+/** Control types allocated to session-resume/1 (registry). */
+export const ResumeControlType = {
+  /** Server → client: the token to resume with. */
+  RESUME_TOKEN: 0x30,
+  /** Client → server: the first frame on a new transport, in place of HELLO. */
+  RESUME: 0x31,
+  /** Server → client: the answer to RESUME, in place of WELCOME. */
+  RESUMED: 0x32,
+  /** Both: acknowledges replayed frames. */
+  RECEIPT: 0x33,
+} as const;
+
+/** session-resume/1 defaults. */
+export const DEFAULT_RESUME_TIMEOUT = 120;
+export const MAX_RESUME_TIMEOUT = 3600;
+/** Unacknowledged replayed frames a sender allows per channel (at least 128). */
+export const DEFAULT_RESUME_FRAME_LIMIT = 4096;
+export const MIN_RESUME_FRAME_LIMIT = 128;
+/** Unacknowledged channel-0 bytes past which a sender closes with 4004. */
+export const DEFAULT_RESUME_CONTROL_LIMIT = 1024 * 1024;
+/** A receiver sends a RECEIPT once this many frames on a channel are unacknowledged... */
+export const RECEIPT_FRAMES = 64;
+/** ...or this many channel-0 bytes. */
+export const RECEIPT_CONTROL_BYTES = 32 * 1024;
+/** Longest token accepted, in UTF-8 bytes. */
+export const MAX_RESUME_TOKEN = 512;
+
 /** Probe types (any channel, PROBE set). */
 export const ProbeType = {
   PING: 0x10,
@@ -62,6 +92,14 @@ export const CloseCode = {
   FLOW_CONTROL_ERROR: 4009,
   CHANNEL_REFUSED: 4010,
   BUSY: 4011,
+  /** session-resume/1: unknown or invalid token, or the session is gone. */
+  RESUME_NOT_FOUND: 4100,
+  /** session-resume/1: the session existed but was discarded after `resumeTimeout`. */
+  RESUME_EXPIRED: 4101,
+  /** session-resume/1: a frame needed for the resume is no longer retained. */
+  RESUME_DATA_LOST: 4102,
+  /** session-resume/1: receive counts that cannot be right (more than was sent). */
+  RESUME_STATE_MISMATCH: 4103,
 } as const;
 
 /** The implicit control channel. */

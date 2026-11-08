@@ -36,6 +36,13 @@ import {
   MIN_MAX_FRAME_PAYLOAD,
   PROTOCOL_VERSION,
   ProbeType,
+  DEFAULT_RESUME_CONTROL_LIMIT,
+  DEFAULT_RESUME_FRAME_LIMIT,
+  MIN_RESUME_FRAME_LIMIT,
+  RECEIPT_CONTROL_BYTES,
+  RECEIPT_FRAMES,
+  ResumeControlType,
+  SESSION_RESUME,
 } from './codec/constants.js';
 import { validateFrame } from './codec/decode-frame.js';
 import { encodeFrame } from './codec/encode-frame.js';
@@ -62,6 +69,13 @@ import {
   pongFrame,
   welcomeFrame,
   windowUpdateFrame,
+  decodeReceipt,
+  decodeResumed,
+  decodeResumeToken,
+  receiptFrame,
+  resumedFrame,
+  resumeFrame,
+  resumeTokenFrame,
 } from './control/codec.js';
 import type {
   ChannelAccept,
@@ -71,6 +85,9 @@ import type {
   ExtensionParams,
   HelloMessage,
   Limits,
+  ReceiptEntry,
+  ReceiveCount,
+  ResumeMessage,
   Version,
   WelcomeMessage,
 } from './control/messages.js';
@@ -81,10 +98,19 @@ import {
   type ChannelHost,
   type ProbeStats,
 } from './channel.js';
-import { XumuxClosedError, XumuxProtocolError } from './errors.js';
+import { XumuxClosedError, XumuxProtocolError, XumuxResumeError } from './errors.js';
 import type { TransportAdapter } from './types.js';
 import { ignore } from './ignore.js';
+import { versionsCompatible } from './version.js';
 import { BasePath, type BasePathSink } from './base-path.js';
+import {
+  constantTimeEqual,
+  ReplayCounter,
+  serialDiff,
+  type ResumableSession,
+  type ResumeRefusal,
+  type SessionResumeStore,
+} from './resume.js';
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
@@ -142,6 +168,11 @@ export interface XumuxOptions {
    * (initialWindow), so this bounds what a peer can make this side buffer. Must be positive.
    */
   maxChannels?: number;
+  /**
+   * session-resume/1: the most replayed frames this side sends on one channel before the peer
+   * acknowledges them with a RECEIPT; at the limit the channel waits. At least 128, default 4096.
+   */
+  resumeFrameLimit?: number;
 }
 
 export interface ConnectOptions {
@@ -203,13 +234,31 @@ export interface AcceptOptions {
    * timeout applies to its arrival as to HELLO's. A first frame of any other type than HELLO
    * still closes with 1002.
    *
-   * In this version the handler can only refuse: the server sends CLOSE with the returned
-   * code (core §3.7) and accept() rejects with {@link XumuxClosedError}. A handler that
-   * throws refuses with the error's code if it is an {@link XumuxProtocolError}, else 1002.
-   * Answering the frame (as session-resume/1's RESUMED does) and handing the transport to
-   * an existing connection is left to the extension implementations that need it.
+   * The handler either refuses, and the server sends CLOSE with the returned code (core §3.7)
+   * and accept() rejects with {@link XumuxClosedError}, or returns `{ handOff }` to give the
+   * transport to another session (session-resume/1 does this with {@link sessionResume}). A
+   * handler that throws refuses with the error's code if it is an {@link XumuxProtocolError},
+   * else 1002.
    */
   firstFrames?: Readonly<Record<number, FirstFrameHandler>>;
+  /**
+   * Enable session-resume/1 with this store of resumable sessions, shared by every accept()
+   * of the server. A client that asks for the extension gets a session that survives the loss
+   * of its transport, and a transport whose first frame is RESUME is handed to the earlier
+   * session it names: accept() then resolves with {@link AcceptResult.resumed} set.
+   */
+  sessionResume?: SessionResumeStore;
+  /**
+   * session-resume/1: authenticate a RESUME for `session` (core §8: by the same means, and
+   * the same identity, as its HELLO). Return a refusal to reject it (default code 4000).
+   * Default: accept, unless the session's own accept() had an `authorize`, in which case every
+   * RESUME is refused with 4000, since a token alone must not let one identity take over
+   * another's session.
+   */
+  authorizeResume?: (
+    resume: ResumeMessage,
+    session: XumuxServer,
+  ) => void | ResumeRefusal | Promise<void | ResumeRefusal>;
 }
 
 /** Server decision on one requested extension (see {@link AcceptOptions.negotiateExtension}). */
@@ -223,8 +272,16 @@ export interface FirstFrame {
   payload: Uint8Array;
 }
 
-/** Answer to an extension-defined first frame. Only refusal (CLOSE) is defined so far. */
-export type FirstFrameDecision = { code: number; reason?: string };
+/**
+ * Answer to an extension-defined first frame: a refusal (sent as CLOSE), or a hand-off.
+ *
+ * `handOff` is called synchronously with the transport's base path, paused, holding every
+ * byte read after the first frame. It gives the path to another session (which starts reading
+ * it) and returns what accept() resolves with; this server is then done, without closing the
+ * transport. If it throws, the server refuses as for a throwing handler.
+ */
+export type FirstFrameDecision =
+  { code: number; reason?: string } | { handOff: (path: BasePath) => AcceptResult };
 
 /** Handles an extension-defined first frame (see {@link AcceptOptions.firstFrames}). */
 export type FirstFrameHandler = (
@@ -239,6 +296,12 @@ export interface AcceptResult {
   extensionParams: ExtensionParams;
   /** HELLO channels this server accepted. */
   channels: XumuxChannel[];
+  /**
+   * session-resume/1: set when the transport resumed an earlier session instead of starting
+   * one. That session now runs on the transport, and the other fields are its own (`channels`:
+   * those open now). The XumuxServer accept() was called on is done.
+   */
+  resumed?: XumuxServer;
 }
 
 /** Detail of the `'close'` event. */
@@ -263,7 +326,77 @@ interface Out {
   bytes: Uint8Array;
   resolve: () => void;
   reject: (e: unknown) => void;
+  /** Called as the frame is written, after it has been counted (session-resume/1). */
+  onWrite?: () => void;
+  /** A copy is retained for replay (session-resume/1), so a failed write is not a loss. */
+  retained?: boolean;
+  /** Written as is: a retransmission, RESUMED or the confirming RECEIPT, never counted. */
+  raw?: boolean;
 }
+
+/** Why a resume cannot go on: 4102 or 4103 (session-resume/1 §7). */
+interface ResumeFailure {
+  code: number;
+  reason: string;
+}
+
+/** A token the server issued (session-resume/1 §3.1, §3.3), in the order the client gets them. */
+interface IssuedToken {
+  token: string;
+  /** RESUME_TOKEN: the channel-0 count once it was written. Confirmed when the peer acks it. */
+  seq?: number;
+  /** RESUMED: the path it went out on. Confirmed by the client's first frame on that path. */
+  path?: BasePath;
+  confirmed?: boolean;
+}
+
+/** session-resume/1 state of a session in which the extension applies. */
+interface ResumeState {
+  /** Counts and retained frames of channel 0. */
+  ch0: ReplayCounter;
+  frameLimit: number;
+  resumeTimeout: number;
+  receiptTimer: ReturnType<typeof setTimeout> | null;
+  detachTimer: ReturnType<typeof setTimeout> | null;
+  /** Client: the latest token. */
+  token?: string;
+  /** Client: no RESUME_TOKEN yet; it must be the server's first frame after WELCOME. */
+  awaitingToken: boolean;
+  /** Client: the resume() in progress. */
+  attempt: ResumeAttempt | null;
+  /** Server: the store, the tokens it holds, and the path awaiting the client's confirmation. */
+  store?: SessionResumeStore;
+  tokens: IssuedToken[];
+  confirmPath: BasePath | null;
+  /** The session ended by timing out, so its tokens now answer 4101. */
+  expired: boolean;
+}
+
+interface ResumeAttempt {
+  path: BasePath;
+  timer: ReturnType<typeof setTimeout>;
+  resolve: () => void;
+  reject: (e: XumuxResumeError) => void;
+}
+
+/** CLOSE codes in answer to RESUME after which the session is gone (session-resume/1 §9). */
+const SESSION_LOST_CODES = new Set<number>([
+  CloseCode.PROTOCOL_ERROR,
+  CloseCode.VERSION_MISMATCH,
+  CloseCode.RESUME_NOT_FOUND,
+  CloseCode.RESUME_EXPIRED,
+  CloseCode.RESUME_DATA_LOST,
+  CloseCode.RESUME_STATE_MISMATCH,
+]);
+
+/** Channel-0 control types that are never counted or replayed (session-resume/1 §4). */
+const UNCOUNTED_CONTROL = new Set<number>([
+  ControlType.HELLO,
+  ControlType.WELCOME,
+  ResumeControlType.RESUME,
+  ResumeControlType.RESUMED,
+  ResumeControlType.RECEIPT,
+]);
 
 interface PendingPing {
   resolve: (rtt: number) => void;
@@ -299,6 +432,10 @@ interface ChannelSlot {
   recvWindow: number;
   tuneStart: number;
   tuneBytes: number;
+  /** session-resume/1 counts and retained frames of this channel instance. */
+  replay: ReplayCounter;
+  /** session-resume/1: the channel-0 count once our CLOSE_CHANNEL was written. */
+  closeSeq?: number;
 }
 
 interface ResolvedLimits {
@@ -345,14 +482,13 @@ function checkWindowOptions(o: XumuxOptions): string | null {
   const mc = o.maxChannels;
   if (mc !== undefined && (!Number.isSafeInteger(mc) || mc < 1))
     return `maxChannels must be a positive integer, got ${String(mc)}`;
+  const fl = o.resumeFrameLimit;
+  if (fl !== undefined && (!Number.isSafeInteger(fl) || fl < MIN_RESUME_FRAME_LIMIT))
+    return `resumeFrameLimit must be an integer of at least ${MIN_RESUME_FRAME_LIMIT}, got ${String(fl)}`;
   return null;
 }
 
-/** Core §3.5: 0.x needs major and minor equal; ≥1.x needs major equal. */
-export function versionsCompatible(a: Version, b: Version): boolean {
-  if (a[0] !== b[0]) return false;
-  return a[0] !== 0 || a[1] === b[1];
-}
+export { versionsCompatible } from './version.js';
 
 /**
  * The entries of `params` for the extensions in `names`, as own properties of a fresh object.
@@ -388,6 +524,15 @@ const abortReason = (signal: AbortSignal): Error =>
 
 const protocolError = (msg: string): XumuxProtocolError =>
   new XumuxProtocolError(CloseCode.PROTOCOL_ERROR, msg);
+
+/** A frame written as is, before anything queued: never counted, nobody waits for it. */
+const rawOut = (bytes: Uint8Array): Out => ({ bytes, resolve: ignore, reject: ignore, raw: true });
+
+/** session-resume/1 §4: frames are replayed on channels that are reliable and ordered (on the base path). */
+const replayed = (slot: ChannelSlot): boolean =>
+  slot.ch.properties.reliable && slot.ch.properties.ordered;
+
+const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 // ─── XumuxPeer ───────────────────────────────────────────────────────────────
 
@@ -463,6 +608,13 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
   protected afterHandshake: Frame[] | null = null;
   /** Server only: control types an extension has claimed as first frames (core §3.1). */
   protected firstFrameTypes: ReadonlySet<number> = new Set();
+
+  /** session-resume/1 state, when the extension applies. */
+  protected rs: ResumeState | null = null;
+  /** Frames written before anything queued on a newly attached path (session-resume/1 §7). */
+  private replayOut: Out[] = [];
+  /** Position in the send order of the next retained frame, across channels. */
+  private sendOrder = 0;
 
   constructor(
     protected readonly transport: TransportAdapter,
@@ -667,7 +819,10 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
 
   /** @internal */
   pingChannel(channelId: number, timeoutMs: number): Promise<number> {
-    if (this.state !== 'open') return Promise.reject(new Error(`cannot ping while ${this.state}`));
+    if (this.state !== 'open' || !this.path)
+      return Promise.reject(
+        new Error(`cannot ping while ${this.state === 'open' ? 'detached' : this.state}`),
+      );
     let pings: Map<number, PendingPing>;
     let stats: ProbeStatsRecorder;
     if (channelId === CONTROL_CHANNEL) {
@@ -884,6 +1039,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
       // The first measurement starts when the initial window is granted.
       tuneStart: performance.now(),
       tuneBytes: 0,
+      replay: new ReplayCounter(),
     };
     this.windowTotal += slot.recvWindow;
     this.slots.set(req.id, slot);
@@ -963,8 +1119,8 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     }
   }
 
-  protected sendControl(frame: Frame): Promise<void> {
-    return this.enqueueUrgent(frame);
+  protected sendControl(frame: Frame, onWrite?: () => void): Promise<void> {
+    return this.enqueueUrgent(frame, onWrite);
   }
 
   protected slotFor(id: number): ChannelSlot | undefined {
@@ -987,10 +1143,11 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
    * The session keeps running when its base path is lost, instead of closing, if this returns
    * true (core §11.1, "keep the connection alive when its base path is lost"). Called only
    * while open, when the transport ends, fails to read or write, or misses keepalive, without
-   * a completed CLOSE exchange. Default false: the connection closes, as the core requires.
+   * a completed CLOSE exchange. Default: true when session-resume/1 applies (and, on the
+   * client, a token has arrived); otherwise the connection closes, as the core requires.
    */
   protected keepOnPathLoss(): boolean {
-    return false;
+    return this.rs !== null && !this.rs.awaitingToken;
   }
 
   private detachOnLoss(): boolean {
@@ -1050,7 +1207,8 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     // A write that never finishes on the dead transport must not hold up its channel's sends.
     const stuck = path.inFlight as Out | null;
     path.inFlight = null;
-    stuck?.reject(new Error(`base path lost: ${reason}`));
+    if (stuck?.retained) stuck.resolve(); // replayed on resume, so not lost
+    else stuck?.reject(new Error(`base path lost: ${reason}`));
     this.stopKeepalive();
     this.keepalivePingAt = null;
     const err = new Error(`base path lost: ${reason}`);
@@ -1063,7 +1221,15 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     };
     abandon(this.controlPings);
     for (const slot of this.slots.values()) abandon(slot.pings);
+    // Retransmissions not yet written are recomputed from the counts on the next resume.
+    for (const o of this.replayOut.splice(0)) o.resolve();
+    this.resumeDetached();
     this.dispatchEvent(new CustomEvent<DetachInfo>('detach', { detail: { reason } }));
+  }
+
+  /** Give a paused base path back to this session (after an extension first frame was refused). */
+  protected resumeReading(): void {
+    if (this.path) this.path.start(this.sinkFor(this.path));
   }
 
   /**
@@ -1128,6 +1294,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
         return;
       }
       if (this.state !== 'open') return this.handlePreOpen(f);
+      if (this.rs) this.noteReceived(f);
       if (f.flags & FrameFlags.PROBE) return this.handleProbe(f);
       if (f.channel === CONTROL_CHANNEL) return this.handleControl(f);
       return this.handleData(f);
@@ -1159,6 +1326,8 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     if (isControl && this.handshakeWaiter && this.firstFrameTypes.has(f.type)) {
       const w = this.handshakeWaiter;
       this.handshakeWaiter = null;
+      // Keep what follows on the path for whoever the handler gives the transport to.
+      this.path?.pause();
       w.resolve({ firstFrame: { type: f.type, payload: f.payload } });
       return;
     }
@@ -1210,6 +1379,8 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
   }
 
   private handleControl(f: Frame): void {
+    if (this.rs && f.type >= ResumeControlType.RESUME_TOKEN && f.type <= ResumeControlType.RECEIPT)
+      return this.onResumeControl(f);
     switch (f.type) {
       case ControlType.HELLO:
       case ControlType.WELCOME:
@@ -1400,6 +1571,8 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
           ? { id: slot.ch.id }
           : { id: slot.ch.id, code, reason },
       ),
+      // session-resume/1 §7 rule 2 needs the channel-0 count that covers this CLOSE_CHANNEL.
+      () => (slot.closeSeq = this.rs?.ch0.sent),
     ).catch(ignore); // the close completes when the peer's CLOSE_CHANNEL arrives
   }
 
@@ -1497,6 +1670,8 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
       this.flushTimer = null;
     }
     if (this.state !== 'open') return;
+    // Receipt before credit (session-resume/1 §5): the RECEIPT goes out first on channel 0.
+    if (this.rs) this.sendReceipt();
     const entries: Array<{ channel: number; increment: number }> = [];
     for (const [id, slot] of this.slots) {
       if (slot.unreturned > 0 && slot.ch.state === 'open' && !slot.sentClose) {
@@ -1522,19 +1697,19 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     return q < 0 ? Infinity : q === 0 ? DEFAULT_MAX_CONTROL_QUEUE : q;
   }
 
-  private enqueueUrgent(frame: Frame): Promise<void> {
-    return this.enqueue(frame, null);
+  private enqueueUrgent(frame: Frame, onWrite?: () => void): Promise<void> {
+    return this.enqueue(frame, null, onWrite);
   }
 
   private enqueueData(channel: number, frame: Frame): Promise<void> {
     return this.enqueue(frame, channel);
   }
 
-  private enqueue(frame: Frame, channel: number | null): Promise<void> {
+  private enqueue(frame: Frame, channel: number | null, onWrite?: () => void): Promise<void> {
     if (this.sendingClosed || this.state === 'closed')
       return Promise.reject(new Error('connection is closing'));
     return new Promise<void>((resolve, reject) => {
-      const out: Out = { bytes: encodeFrame(frame), resolve, reject };
+      const out: Out = { bytes: encodeFrame(frame), resolve, reject, onWrite };
       if (channel === null) {
         const limit = this.controlQueueLimit();
         if (this.state === 'open' && this.urgentBytes + out.bytes.length > limit) {
@@ -1561,18 +1736,32 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
   }
 
   private next(): Out | undefined {
+    const r = this.replayOut.shift();
+    if (r) return r;
     const u = this.urgent.shift();
     if (u) {
       this.urgentBytes -= u.bytes.length;
       return u;
     }
-    const id = this.rr.shift();
-    if (id === undefined) return undefined;
-    const q = this.dataQueues.get(id)!;
-    const out = q.shift()!;
-    if (q.length > 0) this.rr.push(id);
-    else this.dataQueues.delete(id);
-    return out;
+    for (let n = this.rr.length; n > 0; n--) {
+      const id = this.rr.shift()!;
+      if (this.atFrameLimit(id)) {
+        this.rr.push(id); // waits for a RECEIPT (session-resume/1 §5)
+        continue;
+      }
+      const q = this.dataQueues.get(id)!;
+      const out = q.shift()!;
+      if (q.length > 0) this.rr.push(id);
+      else this.dataQueues.delete(id);
+      return out;
+    }
+    return undefined;
+  }
+
+  /** session-resume/1 §5: a channel with `resumeFrameLimit` unacknowledged frames waits. */
+  private atFrameLimit(id: number): boolean {
+    const rs = this.rs;
+    return rs !== null && (this.slots.get(id)?.replay.unacked ?? 0) >= rs.frameLimit;
   }
 
   private async pump(): Promise<void> {
@@ -1584,11 +1773,15 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
       for (let out = this.next(); out; out = this.path === path ? this.next() : undefined) {
         try {
           path.inFlight = out;
+          if (this.rs && !out.raw) this.countSent(out);
+          else out.onWrite?.();
           const r = path.write(out.bytes);
           if (r) await r;
           out.resolve();
         } catch (e) {
-          out.reject(e);
+          // A retained frame is not lost with the transport: it is replayed on resume.
+          if (out.retained) out.resolve();
+          else out.reject(e);
           if (this.path !== path) break;
           if (this.detachOnLoss()) {
             const reason = `transport failed: ${e instanceof Error ? e.message : String(e)}`;
@@ -1674,7 +1867,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     this.beginClose(code, reason, true);
   }
 
-  private finishClose(info: CloseInfo): void {
+  protected finishClose(info: CloseInfo): void {
     if (this.state === 'closed') return;
     this.state = 'closed';
     this.closeInfo = info;
@@ -1698,8 +1891,284 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
       this.finishChannel(slot);
     }
     this.path?.close();
+    this.resumeEnded(info);
     this.resolveClosed(info);
     this.dispatchEvent(new CustomEvent<CloseInfo>('close', { detail: info }));
+  }
+
+  // ─── session-resume/1 ───────────────────────────────────────────────────────
+
+  /** New resume state for a session in which session-resume/1 applies. */
+  protected newResumeState(resumeTimeout: number, awaitingToken: boolean): ResumeState {
+    return {
+      ch0: new ReplayCounter(),
+      frameLimit: this.options.resumeFrameLimit ?? DEFAULT_RESUME_FRAME_LIMIT,
+      resumeTimeout,
+      receiptTimer: null,
+      detachTimer: null,
+      awaitingToken,
+      attempt: null,
+      tokens: [],
+      confirmPath: null,
+      expired: false,
+    };
+  }
+
+  /** Count a frame being written and retain its copy if it is replayed (§4, §5). */
+  private countSent(out: Out): void {
+    const rs = this.rs!;
+    const b = out.bytes;
+    const channel = (b[0]! << 8) | b[1]!;
+    let ctr: ReplayCounter | undefined;
+    if (!(b[3]! & FrameFlags.PROBE)) {
+      if (channel !== CONTROL_CHANNEL) {
+        const slot = this.slots.get(channel);
+        if (slot && replayed(slot)) ctr = slot.replay;
+      } else if (!UNCOUNTED_CONTROL.has(b[2]!)) {
+        ctr = rs.ch0;
+      }
+    }
+    if (ctr) {
+      ctr.retain(this.sendOrder++, b);
+      out.retained = true;
+    }
+    out.onWrite?.();
+    if (ctr === rs.ch0 && rs.ch0.retainedBytes > DEFAULT_RESUME_CONTROL_LIMIT)
+      this.beginClose(
+        CloseCode.RATE_LIMITED,
+        `peer has not acknowledged ${rs.ch0.retainedBytes} bytes of control frames`,
+        false,
+      );
+  }
+
+  /** Count a received frame, and acknowledge it promptly (§4, §5). */
+  private noteReceived(f: Frame): void {
+    const rs = this.rs!;
+    if (rs.confirmPath !== null && rs.confirmPath === this.path) {
+      // The client's first frame after RESUMED: it has the new token (§3.3).
+      for (const t of rs.tokens) if (t.path === rs.confirmPath) t.confirmed = true;
+      rs.confirmPath = null;
+      this.pruneTokens();
+    }
+    const probe = (f.flags & FrameFlags.PROBE) !== 0;
+    if (rs.awaitingToken) {
+      if (probe || f.channel !== CONTROL_CHANNEL || f.type !== ResumeControlType.RESUME_TOKEN)
+        throw protocolError('the first frame after WELCOME must be RESUME_TOKEN');
+    }
+    if (probe) return;
+    let ctr: ReplayCounter;
+    if (f.channel === CONTROL_CHANNEL) {
+      if (UNCOUNTED_CONTROL.has(f.type)) return;
+      ctr = rs.ch0;
+      ctr.unreceiptedBytes += f.payload.length;
+    } else {
+      const slot = this.slots.get(f.channel);
+      if (!slot || !replayed(slot)) return;
+      ctr = slot.replay;
+    }
+    ctr.recv = (ctr.recv + 1) >>> 0;
+    if (
+      serialDiff(ctr.recv, ctr.receipted) >= RECEIPT_FRAMES ||
+      ctr.unreceiptedBytes >= RECEIPT_CONTROL_BYTES
+    )
+      this.sendReceipt();
+    else rs.receiptTimer ??= setTimeout(() => this.sendReceipt(), 0);
+  }
+
+  /** Send a RECEIPT for every replayed channel with unacknowledged frames (§3.4). */
+  private sendReceipt(): void {
+    const rs = this.rs!;
+    if (rs.receiptTimer) clearTimeout(rs.receiptTimer);
+    rs.receiptTimer = null;
+    if (this.state !== 'open') return;
+    const entries: ReceiptEntry[] = [];
+    const add = (channel: number, c: ReplayCounter): void => {
+      c.unreceiptedBytes = 0;
+      if (c.recv === c.receipted) return;
+      entries.push({ channel, count: c.recv });
+      c.receipted = c.recv;
+    };
+    add(CONTROL_CHANNEL, rs.ch0);
+    for (const [id, slot] of this.slots)
+      if (slot.ch.state === 'open' && !slot.sentClose && replayed(slot)) add(id, slot.replay);
+    for (let i = 0; i < entries.length; i += 10000)
+      void this.enqueueUrgent(receiptFrame(entries.slice(i, i + 10000))).catch(ignore);
+  }
+
+  private onResumeControl(f: Frame): void {
+    const rs = this.rs!;
+    if (f.type === ResumeControlType.RECEIPT) return this.onReceipt(decodeReceipt(f.payload));
+    if (f.type === ResumeControlType.RESUME_TOKEN && this.role === 'client') {
+      const m = decodeResumeToken(f.payload);
+      // The most recently received token replaces all earlier ones (§3.1).
+      rs.token = m.token;
+      rs.resumeTimeout = m.resumeTimeout;
+      rs.awaitingToken = false;
+      return;
+    }
+    const names: Record<number, string> = {
+      [ResumeControlType.RESUME_TOKEN]: 'RESUME_TOKEN',
+      [ResumeControlType.RESUME]: 'RESUME',
+      [ResumeControlType.RESUMED]: 'RESUMED',
+    };
+    throw protocolError(`unexpected ${names[f.type]} on an established connection`);
+  }
+
+  /** The peer acknowledges our replayed frames (§3.4). */
+  private onReceipt(entries: ReceiptEntry[]): void {
+    const rs = this.rs!;
+    for (const { channel, count } of entries) {
+      let ctr = rs.ch0;
+      if (channel !== CONTROL_CHANNEL) {
+        const slot = this.slots.get(channel);
+        // Not replayed, closing or unknown: ignored.
+        if (!slot || slot.ch.state !== 'open' || slot.sentClose || !replayed(slot)) continue;
+        ctr = slot.replay;
+      }
+      if (serialDiff(count, ctr.acked) <= 0) continue; // stale
+      if (serialDiff(count, ctr.sent) > 0)
+        throw new XumuxProtocolError(
+          CloseCode.RESUME_STATE_MISMATCH,
+          `RECEIPT for ${count} frames on channel ${channel}, more than were sent`,
+        );
+      ctr.ack(count);
+    }
+    this.pruneTokens();
+    void this.pump(); // a channel at its frame limit may go on
+  }
+
+  /** Our receive counts, for RESUME or RESUMED (§7, "which channels are listed"). */
+  protected receivedList(): ReceiveCount[] {
+    const out: ReceiveCount[] = [[CONTROL_CHANNEL, this.rs!.ch0.recv]];
+    for (const [id, slot] of this.slots) {
+      const s = slot.ch.state;
+      if ((s === 'open' || s === 'opening') && !slot.sentClose && replayed(slot))
+        out.push([id, slot.replay.recv]);
+    }
+    return out;
+  }
+
+  /**
+   * Check the peer's receive counts (§7 steps 2 and 4) and plan the retransmission. Returns a
+   * refusal (4103: a count above what was sent; 4102: a frame the peer needs is gone), or a
+   * function that applies the counts and returns the frames to retransmit, in the order they
+   * were first sent.
+   */
+  protected planResume(received: ReceiveCount[]): ResumeFailure | (() => Uint8Array[]) {
+    const rs = this.rs!;
+    const listed = new Map(received);
+    const c0 = listed.get(CONTROL_CHANNEL)!;
+    listed.delete(CONTROL_CHANNEL);
+    const mismatch = (ch: number, n: number): ResumeFailure => ({
+      code: CloseCode.RESUME_STATE_MISMATCH,
+      reason: `peer reports ${n} frames received on channel ${ch}, more than were sent`,
+    });
+    const check = (ch: number, c: ReplayCounter, n: number): ResumeFailure | null =>
+      serialDiff(n, c.sent) > 0
+        ? mismatch(ch, n)
+        : serialDiff(n, c.acked) < 0
+          ? {
+              code: CloseCode.RESUME_DATA_LOST,
+              reason: `frames the peer needs on channel ${ch} are no longer retained`,
+            }
+          : null;
+    const err0 = check(CONTROL_CHANNEL, rs.ch0, c0);
+    if (err0) return err0;
+    // For each channel instance: retransmit from the listed count, or discard (null).
+    const plan: Array<[ReplayCounter, number | null]> = [];
+    for (const [id, slot] of this.slots) {
+      if (!replayed(slot)) continue;
+      const n = listed.get(id);
+      listed.delete(id);
+      if (slot.sentClose && slot.closeSeq !== undefined && serialDiff(c0, slot.closeSeq) >= 0) {
+        // Rule 2: the peer has processed our CLOSE_CHANNEL, so an entry for this ID is a
+        // later instance, on which we have sent nothing.
+        if (n !== undefined && n !== 0) return mismatch(id, n);
+        plan.push([slot.replay, null]);
+      } else if (n !== undefined) {
+        const err = check(id, slot.replay, n); // rule 3
+        if (err) return err;
+        plan.push([slot.replay, n]);
+      } else {
+        plan.push([slot.replay, null]); // rule 4: closed by the peer, or unknown to it
+      }
+    }
+    // Instances we do not have (not opened yet on our side): we have sent nothing on them.
+    for (const [id, n] of listed) if (n !== 0) return mismatch(id, n);
+    return () => {
+      rs.ch0.ack(c0);
+      for (const [c, n] of plan) {
+        if (n === null) c.discard();
+        else c.ack(n);
+      }
+      const frames = [rs.ch0, ...plan.map(([c]) => c)].flatMap((c) => c.retained);
+      frames.sort((a, b) => a.order - b.order);
+      return frames.map((f) => f.bytes);
+    };
+  }
+
+  /** Server: drop tokens that a confirmed later token has replaced (§3.1, §3.3). */
+  protected pruneTokens(): void {
+    const rs = this.rs!;
+    let last = -1;
+    rs.tokens.forEach((t, i) => {
+      if (t.confirmed || (t.seq !== undefined && serialDiff(rs.ch0.acked, t.seq) >= 0)) last = i;
+    });
+    for (const t of rs.tokens.splice(0, Math.max(0, last))) rs.store?.revoke(t.token);
+  }
+
+  /** Resume on `path`: retransmit `first` and then the frames planned, then carry on. */
+  protected resumeAttached(path: BasePath, first: Uint8Array, frames: Uint8Array[]): void {
+    const rs = this.rs!;
+    if (rs.detachTimer) clearTimeout(rs.detachTimer);
+    rs.detachTimer = null;
+    rs.store?.attached(this as unknown as ResumableSession);
+    // RTT smoothing starts again: the path has probably changed (§7).
+    this.controlStats.reset();
+    for (const slot of this.slots.values()) slot.ch._stats.reset();
+    this.replayOut = [rawOut(first), ...frames.map(rawOut)];
+    this.attachBasePath(path);
+    this.dispatchEvent(new CustomEvent('resume'));
+  }
+
+  /** The base path was lost with session-resume/1 applying: wait up to resumeTimeout (§6). */
+  private resumeDetached(): void {
+    const rs = this.rs;
+    if (!rs) return;
+    if (rs.detachTimer) clearTimeout(rs.detachTimer);
+    rs.detachTimer = unref(
+      setTimeout(() => {
+        rs.detachTimer = null;
+        this.endSession(CloseCode.RESUME_EXPIRED, 'not resumed within resumeTimeout', true);
+      }, rs.resumeTimeout * 1000),
+    );
+    rs.store?.detached(this as unknown as ResumableSession);
+  }
+
+  /** End the session here and now, without CLOSE (it can no longer be resumed). */
+  protected endSession(code: number, reason: string, expired = false): void {
+    if (this.state === 'closed') return;
+    if (this.rs) this.rs.expired = expired;
+    this.finishClose({ code, reason, remote: false });
+  }
+
+  private resumeEnded(info: CloseInfo): void {
+    const rs = this.rs;
+    if (!rs) return;
+    if (rs.receiptTimer) clearTimeout(rs.receiptTimer);
+    if (rs.detachTimer) clearTimeout(rs.detachTimer);
+    rs.receiptTimer = rs.detachTimer = null;
+    const a = rs.attempt;
+    rs.attempt = null;
+    if (a) {
+      clearTimeout(a.timer);
+      a.path.close();
+      a.reject(new XumuxResumeError(info.code, info.reason, info.remote, true));
+    }
+    const tokens = rs.tokens.map((t) => t.token);
+    rs.tokens = [];
+    rs.store?.forget(this as unknown as ResumableSession, tokens, rs.expired);
+    for (const o of this.replayOut.splice(0)) o.resolve();
   }
 
   // ─── Keepalive ──────────────────────────────────────────────────────────────
@@ -1778,6 +2247,150 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
 /** The side that sends HELLO. */
 export class XumuxClient extends XumuxPeer {
   protected readonly role = 'client' as const;
+  /** HELLO `auth`, sent again in RESUME unless resume() is given other credentials. */
+  private connectAuth: Record<string, unknown> | undefined;
+
+  /**
+   * session-resume/1: true once the server has sent a token and while the connection is
+   * open, attached or not. Then a lost transport detaches the session (`'detach'`) instead of
+   * closing it, and {@link resume} continues it on a new transport.
+   */
+  get resumable(): boolean {
+    return this.state === 'open' && this.rs !== null && !this.rs.awaitingToken;
+  }
+
+  /**
+   * session-resume/1: continue this connection on a new `transport` (same binding), sending
+   * RESUME as its first frame. Resolves once the server's RESUMED has been processed; every
+   * frame the server had not received is then retransmitted, in order, before anything new.
+   * Channels, their state and queued sends carry on unchanged. Emits `'resume'`.
+   *
+   * If the session is still attached (this side may learn of a failure first), the old
+   * transport is closed without CLOSE first. `auth` defaults to the HELLO's.
+   *
+   * Rejects with {@link XumuxResumeError}. With `sessionLost` (the server answered 4100–4103,
+   * 1002 or 4006, RESUMED was inconsistent, or RESUME would exceed 65536 bytes, in which case
+   * `transport` is not used), the connection has closed and the application should connect
+   * again with HELLO. Otherwise (the transport failed, the server refused for another reason,
+   * or no answer came within `handshakeTimeoutMs`) the session is still detached and resume()
+   * may be called again, until `resumeTimeout` seconds after the transport was lost.
+   */
+  resume(
+    transport: TransportAdapter,
+    options: { auth?: Record<string, unknown> } = {},
+  ): Promise<void> {
+    const rs = this.rs;
+    if (!this.resumable) return Promise.reject(new Error('this connection cannot be resumed'));
+    if (rs!.attempt) return Promise.reject(new Error('resume() is already in progress'));
+    if (this.path) this.detachBasePath('resuming on a new transport');
+    const auth = options.auth ?? this.connectAuth;
+    const frame = resumeFrame({
+      version: [...PROTOCOL_VERSION] as Version,
+      token: rs!.token!,
+      received: this.receivedList(),
+      ...(auth && { auth }),
+    });
+    if (frame.payload.length > CONTROL_MAX_PAYLOAD) {
+      // §7: a RESUME that would not fit is not sent, and the session is lost.
+      const reason = `RESUME would be ${frame.payload.length} bytes, over the ${CONTROL_MAX_PAYLOAD}-byte limit`;
+      this.endSession(CloseCode.MESSAGE_TOO_LARGE, reason);
+      return Promise.reject(new XumuxResumeError(CloseCode.MESSAGE_TOO_LARGE, reason, false, true));
+    }
+    const path = new BasePath(transport, this.local.maxFramePayload);
+    return new Promise<void>((resolve, reject) => {
+      const timer = unref(
+        setTimeout(
+          () => this.resumeFailed(path, CloseCode.HELLO_TIMEOUT, 'no RESUMED received', false),
+          this.handshakeTimeoutMs,
+        ),
+      );
+      rs!.attempt = { path, timer, resolve, reject };
+      path.start({
+        frame: (f) => this.onResumeAnswer(path, f),
+        end: () =>
+          this.resumeFailed(path, CloseCode.GOING_AWAY, 'transport closed before RESUMED', false),
+      });
+      const failed = (e: unknown): void =>
+        this.resumeFailed(
+          path,
+          CloseCode.GOING_AWAY,
+          `transport failed: ${errorMessage(e)}`,
+          false,
+        );
+      try {
+        void Promise.resolve(path.write(encodeFrame(frame))).catch(failed);
+      } catch (e) {
+        failed(e);
+      }
+    });
+  }
+
+  /** The server's answer to RESUME: RESUMED or CLOSE, and nothing else (§7, core §3.1). */
+  private onResumeAnswer(path: BasePath, f: Frame): void {
+    const rs = this.rs!;
+    const a = rs.attempt;
+    if (a?.path !== path) return;
+    try {
+      validateFrame(f);
+      const control = f.channel === CONTROL_CHANNEL && !(f.flags & FrameFlags.PROBE);
+      if (control && f.type === ControlType.CLOSE) {
+        const m = decodeClose(f.payload);
+        this.writeClose(path, m.code);
+        const lost = SESSION_LOST_CODES.has(m.code);
+        return this.resumeFailed(path, m.code, m.reason ?? 'RESUME refused', lost, true);
+      }
+      if (!control || f.type !== ResumeControlType.RESUMED)
+        throw protocolError('expected RESUMED or CLOSE in answer to RESUME');
+      const msg = decodeResumed(f.payload);
+      const plan = this.planResume(msg.received); // step 4
+      if (typeof plan !== 'function') throw new XumuxProtocolError(plan.code, plan.reason);
+      clearTimeout(a.timer);
+      rs.attempt = null;
+      rs.token = msg.token;
+      rs.resumeTimeout = msg.resumeTimeout;
+      const frames = plan();
+      // The confirming RECEIPT for channel 0 comes first (§3.3), then the retransmissions.
+      rs.ch0.receipted = rs.ch0.recv;
+      rs.ch0.unreceiptedBytes = 0;
+      const receipt = encodeFrame(receiptFrame([{ channel: CONTROL_CHANNEL, count: rs.ch0.recv }]));
+      this.resumeAttached(path, receipt, frames);
+      a.resolve();
+    } catch (e) {
+      // A violation in the answer ends the session, with CLOSE on the new transport.
+      const code = e instanceof XumuxProtocolError ? e.code : CloseCode.PROTOCOL_ERROR;
+      this.writeClose(path, code, errorMessage(e));
+      this.resumeFailed(path, code, errorMessage(e), true);
+    }
+  }
+
+  /** Write CLOSE straight to a path that is not attached. */
+  private writeClose(path: BasePath, code: number, reason?: string): void {
+    try {
+      void Promise.resolve(
+        path.write(encodeFrame(closeFrame(reason ? { code, reason } : { code }))),
+      ).catch(ignore);
+    } catch {
+      /* the transport is gone */
+    }
+  }
+
+  /** A resume() attempt on `path` failed. With `lost`, so did the session. */
+  private resumeFailed(
+    path: BasePath,
+    code: number,
+    reason: string,
+    lost: boolean,
+    remote = false,
+  ): void {
+    const rs = this.rs!;
+    const a = rs.attempt;
+    if (a?.path !== path) return;
+    rs.attempt = null;
+    clearTimeout(a.timer);
+    path.close();
+    if (lost) this.finishClose({ code, reason, remote });
+    a.reject(new XumuxResumeError(code, reason, remote, lost));
+  }
 
   /** Send HELLO and wait for WELCOME. Rejects with XumuxClosedError if the server refuses. */
   async connect(opts: ConnectOptions = {}): Promise<ConnectResult> {
@@ -1787,6 +2400,7 @@ export class XumuxClient extends XumuxPeer {
     const ids = this.allocateIds(requests.length);
     const channels: ChannelRequest[] = requests.map((r, i) => ({ ...r, id: ids[i]! }));
     const extensionParams = pickParams(opts.extensionParams, opts.extensions ?? []);
+    this.connectAuth = opts.auth;
 
     const hello: HelloMessage = {
       version: [...PROTOCOL_VERSION] as Version,
@@ -1826,6 +2440,8 @@ export class XumuxClient extends XumuxPeer {
       // Keys for extensions that were not accepted are ignored (core §3.8).
       welcomeParams = pickParams(welcome.extensionParams, extensions);
       for (const ext of extensions) {
+        // session-resume/1 defines no parameters, and ignores its key (core §3.8).
+        if (ext === SESSION_RESUME) continue;
         let ok: boolean;
         try {
           ok = opts.checkExtensionParams?.(ext, getParam(welcomeParams, ext)) ?? true;
@@ -1853,6 +2469,8 @@ export class XumuxClient extends XumuxPeer {
       throw e;
     }
 
+    // session-resume/1 (§2): the server's first frame after WELCOME must be RESUME_TOKEN.
+    if (extensions.includes(SESSION_RESUME)) this.rs = this.newResumeState(0, true);
     this.enterOpen(
       welcome.pingInterval ?? DEFAULT_PING_INTERVAL,
       welcome.pingTimeout ?? DEFAULT_PING_TIMEOUT,
@@ -1886,13 +2504,93 @@ export class XumuxClient extends XumuxPeer {
 // ─── XumuxServer ─────────────────────────────────────────────────────────────
 
 /** The side that answers HELLO. */
-export class XumuxServer extends XumuxPeer {
+export class XumuxServer extends XumuxPeer implements ResumableSession {
   protected readonly role = 'server' as const;
+  /** @internal The client was authenticated in HELLO, so RESUME must be too. */
+  _authenticated = false;
+  /** What accept() resolved with, less the channels (session-resume/1 hand-offs reuse it). */
+  private acceptInfo: Omit<AcceptResult, 'channels'> | null = null;
+
+  /**
+   * session-resume/1: send a new RESUME_TOKEN, replacing the current token once the client
+   * has acknowledged it (§3.1). Throws unless the extension applies and the connection is open.
+   */
+  rotateResumeToken(): void {
+    if (!this.rs || this.state !== 'open') throw new Error('session-resume/1 does not apply');
+    this.issueResumeToken();
+  }
+
+  private issueResumeToken(): void {
+    const rs = this.rs!;
+    const entry: IssuedToken = { token: rs.store!.issue(this) };
+    rs.tokens.push(entry);
+    void this.sendControl(
+      resumeTokenFrame({ token: entry.token, resumeTimeout: rs.resumeTimeout }),
+      () => (entry.seq = rs.ch0.sent),
+    ).catch(ignore);
+  }
+
+  /** @internal session-resume/1 §7 steps 2–3: take this session over onto `path`. */
+  _takeOver(path: BasePath, msg: ResumeMessage): AcceptResult {
+    const rs = this.rs;
+    if (!rs || this.state !== 'open')
+      throw new XumuxProtocolError(CloseCode.RESUME_NOT_FOUND, 'the session is gone');
+    const plan = this.planResume(msg.received);
+    if (typeof plan !== 'function') {
+      // 4102 and 4103 end the session (§7 step 2).
+      this.endSession(plan.code, plan.reason);
+      throw new XumuxProtocolError(plan.code, plan.reason);
+    }
+    const i = rs.tokens.findIndex((t) => constantTimeEqual(t.token, msg.token));
+    if (i < 0) throw new XumuxProtocolError(CloseCode.RESUME_NOT_FOUND, 'unknown session');
+    // A takeover (§6): stop reading the old transport and close it, without CLOSE.
+    if (this.path) this.detachBasePath('taken over by a new transport');
+    const frames = plan();
+    // The presented token and the new one stay valid until the client's first frame on the
+    // new transport (§3.3); every other one goes, except RESUME_TOKENs that are about to be
+    // retransmitted or are still queued, which the client will receive after RESUMED.
+    const presented: IssuedToken = { ...rs.tokens[i]!, confirmed: true };
+    const later: IssuedToken[] = [];
+    rs.tokens.forEach((t, k) => {
+      if (k === i) return;
+      if (k > i && !t.path && (t.seq === undefined || serialDiff(rs.ch0.acked, t.seq) < 0))
+        later.push(t);
+      else rs.store!.revoke(t.token);
+    });
+    const fresh: IssuedToken = { token: rs.store!.issue(this), path };
+    rs.tokens = [presented, fresh, ...later];
+    const resumed = resumedFrame({
+      token: fresh.token,
+      resumeTimeout: rs.resumeTimeout,
+      received: this.receivedList(),
+    });
+    if (resumed.payload.length > CONTROL_MAX_PAYLOAD) {
+      const reason = 'RESUMED would exceed 65536 bytes';
+      this.endSession(CloseCode.RESUME_DATA_LOST, reason);
+      throw new XumuxProtocolError(CloseCode.RESUME_DATA_LOST, reason);
+    }
+    rs.confirmPath = path;
+    this.resumeAttached(path, encodeFrame(resumed), frames);
+    return { ...this.acceptInfo!, channels: [...this.channels.values()], resumed: this };
+  }
+
+  /** @internal End a detached session (store eviction), without CLOSE. */
+  _discard(code: number, reason: string): void {
+    this.endSession(code, reason);
+  }
 
   /** Wait for HELLO, validate it, decide on its channels, and send WELCOME (or CLOSE). */
   async accept(opts: AcceptOptions = {}): Promise<AcceptResult> {
     if (this.state !== 'idle') throw new Error('accept() may only be called once');
-    const firstFrames = opts.firstFrames ?? {};
+    const store = opts.sessionResume;
+    const firstFrames: Record<number, FirstFrameHandler> = { ...opts.firstFrames };
+    if (store) {
+      if (Object.hasOwn(firstFrames, ResumeControlType.RESUME))
+        throw new RangeError('firstFrames has a handler for 0x31, which sessionResume uses');
+      firstFrames[ResumeControlType.RESUME] = store.resumeHandler(opts.authorizeResume);
+    } else if (opts.extensions?.includes(SESSION_RESUME)) {
+      throw new RangeError(`${SESSION_RESUME} needs AcceptOptions.sessionResume`);
+    }
     const types = Object.keys(firstFrames).map(Number);
     for (const t of types)
       if (!Number.isInteger(t) || t < EXTENSION_CONTROL_TYPE_MIN || t > EXTENSION_CONTROL_TYPE_MAX)
@@ -1919,6 +2617,25 @@ export class XumuxServer extends XumuxPeer {
       }
       if (this.state !== 'handshaking')
         throw new XumuxClosedError(CloseCode.GOING_AWAY, 'closed during handshake');
+      if ('handOff' in d) {
+        try {
+          const result = d.handOff(this.path!);
+          // The transport now belongs to another session: finish without closing it.
+          this.path = null;
+          this.finishClose({
+            code: CloseCode.NORMAL,
+            reason: 'transport handed to another session',
+            remote: false,
+          });
+          return result;
+        } catch (e) {
+          d = {
+            code: e instanceof XumuxProtocolError ? e.code : CloseCode.PROTOCOL_ERROR,
+            reason: errorMessage(e),
+          };
+        }
+      }
+      this.resumeReading();
       return refuse(d.code, d.reason ?? 'refused');
     }
     const hello = first as HelloMessage;
@@ -1953,6 +2670,7 @@ export class XumuxServer extends XumuxPeer {
       throw new XumuxClosedError(CloseCode.GOING_AWAY, 'closed during handshake');
 
     const supported = new Set(opts.extensions ?? []);
+    if (store) supported.add(SESSION_RESUME);
     const offered = pickParams(hello.extensionParams, hello.extensions ?? []);
     const extensions: string[] = [];
     const extensionParams: ExtensionParams = {};
@@ -1968,7 +2686,9 @@ export class XumuxServer extends XumuxPeer {
       }
       if (d === false) continue;
       extensions.push(ext);
-      if (d !== true && d.params !== undefined) setParam(extensionParams, ext, d.params);
+      // session-resume/1 defines no parameters (its §1).
+      if (d !== true && d.params !== undefined && !(store && ext === SESSION_RESUME))
+        setParam(extensionParams, ext, d.params);
     }
     const accepted: ChannelAccept[] = [];
     const rejected: ChannelRefusal[] = [];
@@ -2027,12 +2747,19 @@ export class XumuxServer extends XumuxPeer {
       );
     const channels = openReqs.map((req, i) => this.createSlot(req, false, 'open', accepted[i]).ch);
     void this.sendControl(frame).catch(ignore);
+    if (store && extensions.includes(SESSION_RESUME)) {
+      // session-resume/1 (§2): RESUME_TOKEN is the first frame after WELCOME.
+      this.rs = this.newResumeState(store.resumeTimeout, false);
+      this.rs.store = store;
+      this._authenticated = opts.authorize !== undefined;
+      this.issueResumeToken();
+    }
     this.enterOpen(pingInterval, pingTimeout);
-    return {
+    this.acceptInfo = {
       hello,
       extensions,
       extensionParams: pickParams(hello.extensionParams, extensions),
-      channels,
     };
+    return { ...this.acceptInfo, channels };
   }
 }

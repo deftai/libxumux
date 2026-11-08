@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { CloseCode } from './constants.js';
 
 describe('CloseCode', () => {
-  it('matches the code table in core §10', () => {
+  it('matches the code table in core §10 and the registry', () => {
     expect(CloseCode).toEqual({
       NORMAL: 1000,
       GOING_AWAY: 1001,
@@ -20,6 +20,11 @@ describe('CloseCode', () => {
       FLOW_CONTROL_ERROR: 4009,
       CHANNEL_REFUSED: 4010,
       BUSY: 4011,
+      // session-resume/1 (registry)
+      RESUME_NOT_FOUND: 4100,
+      RESUME_EXPIRED: 4101,
+      RESUME_DATA_LOST: 4102,
+      RESUME_STATE_MISMATCH: 4103,
     });
   });
 });
