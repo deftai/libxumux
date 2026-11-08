@@ -22,7 +22,10 @@ export type {
   FirstFrameHandler,
   CloseInfo,
   ChannelCloseEventDetail,
+  DetachInfo,
 } from './session.js';
+export { BasePath } from './base-path.js';
+export type { BasePathSink } from './base-path.js';
 
 export { XumuxChannel } from './channel.js';
 export type {

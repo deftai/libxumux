@@ -1,9 +1,11 @@
 /**
  * xumux 0.3 session: XumuxPeer, XumuxClient, XumuxServer.
  *
- * One transport → one session → N channels. The session owns framing, magic bytes,
- * limits, the outbound scheduler (control first, then channels round-robin), flow
- * control, fragmentation, probes, keepalive and the close procedure.
+ * One base path → one session → N channels. The base path ({@link BasePath}) owns
+ * framing and magic bytes over the transport; the session owns limits, the outbound
+ * scheduler (control first, then channels round-robin), flow control, fragmentation,
+ * probes, keepalive and the close procedure. An extension can keep the session alive when
+ * its base path is lost and attach a new one (core §11.1).
  *
  * @see https://github.com/deftai/xumux/blob/main/spec/core.md
  * @module session
@@ -34,9 +36,8 @@ import {
   MIN_MAX_FRAME_PAYLOAD,
   PROTOCOL_VERSION,
   ProbeType,
-  XMUX_MAGIC,
 } from './codec/constants.js';
-import { decodeFrame, StreamFramer, validateFrame } from './codec/decode-frame.js';
+import { validateFrame } from './codec/decode-frame.js';
 import { encodeFrame } from './codec/encode-frame.js';
 import type { Frame } from './codec/frame.js';
 import {
@@ -83,6 +84,7 @@ import {
 import { XumuxClosedError, XumuxProtocolError } from './errors.js';
 import type { TransportAdapter } from './types.js';
 import { ignore } from './ignore.js';
+import { BasePath, type BasePathSink } from './base-path.js';
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
@@ -241,6 +243,11 @@ export interface AcceptResult {
 
 /** Detail of the `'close'` event. */
 export type CloseInfo = ChannelCloseInfo;
+
+/** Detail of the `'detach'` event: the base path was lost and the session kept (core §11.1). */
+export interface DetachInfo {
+  reason: string;
+}
 
 /** Detail of the `'channel-close'` event. */
 export interface ChannelCloseEventDetail extends ChannelCloseInfo {
@@ -404,14 +411,16 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
   private readonly slots = new Map<number, ChannelSlot>();
   /** Peer-opened IDs awaiting a policy decision (reserved, not yet channels). */
   private readonly pendingRemote = new Set<number>();
-  private readonly framer: StreamFramer | null;
-  private magicSent: boolean;
+  /**
+   * The base path frames travel on, or null while detached (an extension kept the session
+   * when the path was lost, core §11.1). Only frames from this path are processed.
+   */
+  protected path: BasePath | null;
 
   // Outbound scheduler
   private readonly urgent: Out[] = [];
   private readonly dataQueues = new Map<number, Out[]>();
   private readonly rr: number[] = [];
-  private pumping = false;
   private idleWaiters: Array<() => void> = [];
   private sendingClosed = false;
 
@@ -433,6 +442,8 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
   private lastRx = performance.now();
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
   private keepalivePingAt: number | null = null;
+  /** Effective keepalive parameters (seconds), kept to restart keepalive on a new base path. */
+  private keepaliveParams: { interval: number; timeout: number } | null = null;
 
   // Close
   private closeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -462,10 +473,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     this.local = resolveLimits(options);
     const err = checkLimits(this.local) ?? checkWindowOptions(options);
     if (err) throw new RangeError(err);
-    const stream = transport.kind === 'stream';
-    const magic = stream && transport.magic !== false;
-    this.framer = stream ? new StreamFramer(this.local.maxFramePayload, magic) : null;
-    this.magicSent = !magic;
+    this.path = new BasePath(transport, this.local.maxFramePayload);
     this.closed = new Promise((r) => (this.resolveClosed = r));
   }
 
@@ -514,7 +522,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
   /** Graceful close: flush queued data, CLOSE, wait for the peer's CLOSE, close the transport. */
   async close(code: number = CloseCode.NORMAL, reason?: string): Promise<CloseInfo> {
     if (this.state === 'closed' || this.state === 'closing') return this.closed;
-    if (this.state === 'open') {
+    if (this.state === 'open' && this.path) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([
         this.drain(),
@@ -779,9 +787,9 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
 
   /** Start reading from the transport (idempotent). */
   protected startReceiving(): void {
-    if (this.receiving) return;
+    if (this.receiving || !this.path) return;
     this.receiving = true;
-    void this.receiveLoop();
+    this.path.start(this.sinkFor(this.path));
   }
 
   protected get closeTimeoutMs(): number {
@@ -965,22 +973,51 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
 
   // ─── Receive path ───────────────────────────────────────────────────────────
 
-  private async receiveLoop(): Promise<void> {
-    try {
-      for await (const chunk of this.transport.receive()) {
-        if (this.state === 'closed') break;
-        const frames = this.framer
-          ? this.framer.push(chunk)
-          : [decodeFrame(chunk, this.local.maxFramePayload)];
-        for (const f of frames) {
-          this.handleFrame(f);
-          if ((this.state as SessionState) === 'closed') break;
-        }
-      }
-    } catch (e) {
-      // The input can't be parsed any further. fail() queues CLOSE with the right code;
-      // let it reach the wire, then finish with that cause (core §9.1).
-      this.fail(e);
+  /** A sink that feeds `path`'s frames to the session for as long as it is the current path. */
+  protected sinkFor(path: BasePath): BasePathSink {
+    return {
+      frame: (f) => {
+        if (path === this.path && this.state !== 'closed') this.handleFrame(f);
+      },
+      end: (cause) => void this.pathEnded(path, cause),
+    };
+  }
+
+  /**
+   * The session keeps running when its base path is lost, instead of closing, if this returns
+   * true (core §11.1, "keep the connection alive when its base path is lost"). Called only
+   * while open, when the transport ends, fails to read or write, or misses keepalive, without
+   * a completed CLOSE exchange. Default false: the connection closes, as the core requires.
+   */
+  protected keepOnPathLoss(): boolean {
+    return false;
+  }
+
+  private detachOnLoss(): boolean {
+    return this.state === 'open' && this.path !== null && this.keepOnPathLoss();
+  }
+
+  /** The current base path's input ended. */
+  private async pathEnded(
+    path: BasePath,
+    cause: { readError?: unknown; parseError?: unknown },
+  ): Promise<void> {
+    if (path !== this.path) return;
+    if ('parseError' in cause) {
+      // The input can't be parsed any further: a protocol violation, never a lost path.
+      // fail() queues CLOSE with the right code; let it reach the wire, then finish with that
+      // cause (core §9.1).
+      this.fail(cause.parseError);
+    } else if (this.detachOnLoss()) {
+      const e = cause.readError;
+      this.detachBasePath(
+        'readError' in cause
+          ? `transport failed: ${e instanceof Error ? e.message : String(e)}`
+          : 'transport closed',
+      );
+      return;
+    } else if ('readError' in cause) {
+      this.fail(cause.readError);
     }
     // The input ended. If we are closing (for example the peer sent CLOSE and then
     // shut its write side), let our CLOSE reach the wire before finishing; the close
@@ -992,6 +1029,52 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
           ? this.closeInfo
           : { code: CloseCode.GOING_AWAY, reason: 'transport closed', remote: true },
       );
+  }
+
+  /**
+   * Detach the base path: close its transport without sending anything, and keep the
+   * session, its channels and their queued sends as they are. Keepalive stops and pending
+   * PINGs are abandoned (rejected, but not counted as lost). Emits `'detach'`.
+   */
+  protected detachBasePath(reason: string): void {
+    const path = this.path;
+    if (!path) return;
+    this.path = null;
+    path.close();
+    this.stopKeepalive();
+    this.keepalivePingAt = null;
+    const err = new Error(`base path lost: ${reason}`);
+    const abandon = (pings: Map<number, PendingPing>): void => {
+      for (const p of pings.values()) {
+        clearTimeout(p.timer);
+        p.reject(err);
+      }
+      pings.clear();
+    };
+    abandon(this.controlPings);
+    for (const slot of this.slots.values()) abandon(slot.pings);
+    this.dispatchEvent(new CustomEvent<DetachInfo>('detach', { detail: { reason } }));
+  }
+
+  /**
+   * Attach `path` as the new base path of a detached, open session: read from it, send the
+   * queued frames on it, and restart keepalive.
+   */
+  protected attachBasePath(path: BasePath): void {
+    if (this.path) throw new Error('a base path is already attached');
+    if (this.state !== 'open') throw new Error(`cannot attach a base path while ${this.state}`);
+    this.path = path;
+    path.setMaxFramePayload(this.local.maxFramePayload);
+    path.start(this.sinkFor(path));
+    this.lastRx = performance.now();
+    if (this.keepaliveParams)
+      this.startKeepalive(this.keepaliveParams.interval, this.keepaliveParams.timeout);
+    void this.pump();
+  }
+
+  /** True while the session has no base path (detached, waiting for a new one). */
+  get detached(): boolean {
+    return this.path === null && this.state === 'open';
   }
 
   /** Turn an error from frame processing into the right close. */
@@ -1483,30 +1566,35 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
   }
 
   private async pump(): Promise<void> {
-    if (this.pumping) return;
-    this.pumping = true;
+    const path = this.path;
+    if (!path || path.pumping) return;
+    path.pumping = true;
     try {
-      for (let out = this.next(); out; out = this.next()) {
+      // Stop as soon as the path is detached: what is still queued waits for the next one.
+      for (let out = this.next(); out; out = this.path === path ? this.next() : undefined) {
         try {
-          if (!this.magicSent) {
-            this.magicSent = true;
-            const r = this.transport.send(new Uint8Array(XMUX_MAGIC));
-            if (r) await r;
-          }
-          const r = this.transport.send(out.bytes);
+          const r = path.write(out.bytes);
           if (r) await r;
           out.resolve();
         } catch (e) {
           out.reject(e);
-          this.rejectQueued(e);
+          if (this.path !== path) break;
+          if (this.detachOnLoss()) {
+            const reason = `transport failed: ${e instanceof Error ? e.message : String(e)}`;
+            this.detachBasePath(reason);
+          } else {
+            this.rejectQueued(e);
+          }
           break;
         }
       }
     } finally {
-      this.pumping = false;
-      const ws = this.idleWaiters;
-      this.idleWaiters = [];
-      for (const w of ws) w();
+      path.pumping = false;
+      if (this.path === path || !this.path) {
+        const ws = this.idleWaiters;
+        this.idleWaiters = [];
+        for (const w of ws) w();
+      }
     }
   }
 
@@ -1531,7 +1619,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
   /** Resolve once every channel's queued sends and the outbound queue are flushed. */
   private async drain(): Promise<void> {
     await Promise.all([...this.slots.values()].map((s) => s.sendChain));
-    if (this.pumping || this.urgent.length > 0 || this.rr.length > 0) {
+    if (this.path?.pumping || this.urgent.length > 0 || this.rr.length > 0) {
       await new Promise<void>((r) => this.idleWaiters.push(r));
     }
   }
@@ -1547,6 +1635,12 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     this.handshakeWaiter?.reject(new XumuxClosedError(code, reason, remote));
     this.handshakeWaiter = null;
     const frame = closeFrame(reason ? { code, reason } : { code });
+    if (!this.path) {
+      // Detached: there is no path to send CLOSE on, and CLOSE ends the session anyway.
+      this.sendingClosed = true;
+      this.finishClose(this.closeInfo);
+      return;
+    }
     const sent = this.enqueueUrgent(frame);
     this.closeSent = sent;
     this.sendingClosed = true;
@@ -1591,11 +1685,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
           : { code: info.code, reason: info.reason, remote: info.remote };
       this.finishChannel(slot);
     }
-    try {
-      this.transport.close();
-    } catch {
-      /* already closed */
-    }
+    this.path?.close();
     this.resolveClosed(info);
     this.dispatchEvent(new CustomEvent<CloseInfo>('close', { detail: info }));
   }
@@ -1603,6 +1693,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
   // ─── Keepalive ──────────────────────────────────────────────────────────────
 
   private startKeepalive(intervalS: number, timeoutS: number): void {
+    this.keepaliveParams = { interval: intervalS, timeout: timeoutS };
     if (!(intervalS > 0)) return;
     const intervalMs = intervalS * 1000;
     const timeoutMs = timeoutS * 1000;
@@ -1614,8 +1705,13 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
         const now = performance.now();
         if (this.keepalivePingAt !== null) {
           if (now - this.keepalivePingAt >= timeoutMs) {
-            this.beginClose(CloseCode.KEEPALIVE_TIMEOUT, 'keepalive timeout', false);
-            this.finishClose(this.closeInfo!);
+            if (this.detachOnLoss()) {
+              // Close the transport without CLOSE 4008, which would end the session.
+              this.detachBasePath('keepalive timeout');
+            } else {
+              this.beginClose(CloseCode.KEEPALIVE_TIMEOUT, 'keepalive timeout', false);
+              this.finishClose(this.closeInfo!);
+            }
           }
           return;
         }
