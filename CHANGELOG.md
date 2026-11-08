@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-08
+
 ### xumux 0.3 core (breaking on the wire)
 
 Implements the xumux 0.3.0-draft core specification (deftai/xumux `spec/core.md` at `v0.3.0-draft`).
@@ -138,7 +140,8 @@ Implements the xumux 0.2.0-draft core specification (deftai/xumux `spec/core.md`
 - `HEADER_SIZE` constant (8)
 - Initial project scaffold (package.json, tsconfig.json, tsup, Vitest, ESLint, Prettier, Taskfile)
 
-[Unreleased]: https://github.com/deftai/libxumux/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/deftai/libxumux/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/deftai/libxumux/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/deftai/libxumux/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/deftai/libxumux/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/deftai/libxumux/compare/v0.2.0...v0.3.0
