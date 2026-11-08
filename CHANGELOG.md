@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-08
+
 ### Added
 
 - `libxumux/pipe`: the pipe/1 profile (one bidirectional byte stream, with half-close, per channel) as a Node `stream.Duplex`, so `stream.pipeline()`, `http` and `tls` run over a channel. `PipeSocket` maps `end()` to EOF, `destroy(err)` and `resetAndDestroy()` to RESET, the peer's RESET to a `PipeResetError`, and closes the channel after both EOFs (1000) or a RESET (1001). Unknown message types close the channel with 1002. Credit goes back to the peer only as the consumer reads, and DATA is never fragmented. `dialPipe()` opens a pipe; `PipeListener` accepts them, checking profile, reliable+ordered and an optional `check` hook for target allow-lists, with `'connection'` events, `accept()` and `for await`. Also `pipeRequest()`, `checkPipeRequest()`, `pipeTarget()` and the pipe/1 constants. Tested against libxumux-go's `pipe` package (set `LIBXUMUX_GO_DIR` to run the interop e2e test). `deft-libxumux` re-exports it as `deft-libxumux/pipe`.
@@ -118,7 +120,8 @@ Implements the xumux 0.2.0-draft core specification (deftai/xumux `spec/core.md`
 - `HEADER_SIZE` constant (8)
 - Initial project scaffold (package.json, tsconfig.json, tsup, Vitest, ESLint, Prettier, Taskfile)
 
-[Unreleased]: https://github.com/deftai/libxumux/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/deftai/libxumux/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/deftai/libxumux/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/deftai/libxumux/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/deftai/libxumux/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/deftai/libxumux/releases/tag/v0.2.0
