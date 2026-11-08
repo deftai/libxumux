@@ -87,6 +87,27 @@ describe('XumuxChannel.sendPrefix', () => {
     );
   });
 
+  it('an abort while waiting behind another send rejects at once and sends nothing', async () => {
+    const { a, b, data } = await pair();
+    await a.send(1, new Uint8Array(DEFAULT_INITIAL_WINDOW));
+    const first = a.sendPrefix(2, new Uint8Array(10)); // waits for credit
+    const ac = new AbortController();
+    const second = a.sendPrefix(3, new Uint8Array(10), ac.signal); // waits behind first
+    await later(20);
+    ac.abort(new Error('gave up'));
+    const r = await Promise.race([second.catch((e: Error) => e.message), later(200)]);
+    expect(r).toBe('gave up');
+    const before = data().length;
+    await b.receive(); // credit returns: first goes, second must not
+    expect(await first).toBe(10);
+    await later(20);
+    expect(
+      data()
+        .slice(before)
+        .map((f) => f.type),
+    ).toEqual([2]);
+  });
+
   it('rejects at once when the signal has already aborted', async () => {
     const { a, data } = await pair();
     const before = data().length;

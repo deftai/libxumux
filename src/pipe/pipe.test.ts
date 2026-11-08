@@ -396,6 +396,17 @@ describe('PipeSocket', () => {
     expect(types).toEqual([PipeMessageType.EOF]);
   });
 
+  it('sends EOF when end() and destroy() come in the same turn', async () => {
+    const { client, listener } = await sessions();
+    const raw = await client.openChannel(pipeRequest('raw'));
+    const b = await listener.accept();
+    b.end();
+    b.destroy();
+    const types: number[] = [];
+    for await (const m of raw) types.push(m.type);
+    expect(types).toEqual([PipeMessageType.EOF]);
+  });
+
   it('ends the readable side when the channel closes without an EOF', async () => {
     const { client, listener } = await sessions();
     const raw = await client.openChannel(pipeRequest('raw'));
@@ -433,6 +444,27 @@ describe('PipeSocket', () => {
     const { a, b } = await pipePair();
     a.resetAndDestroy(4501, 'x'.repeat(5000));
     expect(((await drain(b)).err as PipeResetError).reason).toHaveLength(1024);
+  });
+
+  it('caps the reason in UTF-8 bytes, at a character boundary', async () => {
+    const { a, b } = await pipePair();
+    a.resetAndDestroy(4501, 'é'.repeat(1000)); // 2000 bytes
+    const reason = ((await drain(b)).err as PipeResetError).reason!;
+    expect(reason).toBe('é'.repeat(512));
+  });
+
+  it('keeps a RESET within the smallest maxMessageSize, however the reason escapes', async () => {
+    // A peer may declare maxMessageSize 4096; 1024 NULs escape to over 6 KiB of JSON.
+    const ss = await sessions(
+      {},
+      { maxFramePayload: 4096, maxMessageSize: 4096, initialWindow: 4096 },
+    );
+    const [a, b] = await Promise.all([dialPipe(ss.client), ss.listener.accept()]);
+    quiet(a);
+    a.resetAndDestroy(4501, '\0'.repeat(1024));
+    const { err } = await drain(b);
+    expect(err).toMatchObject({ code: 4501 });
+    expect((err as PipeResetError).reason).toMatch(/^\0+$/);
   });
 
   it("emits 'timeout' when idle, like net.Socket", async () => {
@@ -504,6 +536,16 @@ describe('PipeListener', () => {
     ]);
     expect(s.target).toBe('tcp:allowed:1');
     c.destroy();
+  });
+
+  it('a RESET before accept() does not crash; the accepted socket shows it', async () => {
+    const { client, listener } = await sessions();
+    const a = await dialPipe(client);
+    a.resetAndDestroy(4501, 'early');
+    await later(30); // the RESET arrives and destroys the backlogged socket meanwhile
+    const s = await listener.accept();
+    expect(s.destroyed).toBe(true);
+    expect(s.errored).toMatchObject({ code: 4501, reason: 'early' });
   });
 
   it('refuses with 4010 when check throws', async () => {
@@ -628,7 +670,7 @@ describe('HTTP over pipes', () => {
         req.on('end', () => res.end(hash.digest('hex')));
         return;
       }
-      res.end(`hello ${req.url!.slice(1)}`);
+      res.end(`hello ${Number(req.url!.slice(1))}`);
     });
     listener.on('connection', (s) => web.emit('connection', s));
     cleanups.push(() => web.close());

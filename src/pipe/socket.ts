@@ -8,8 +8,10 @@ import { CloseCode } from '../codec/constants.js';
 import type { ChannelMessage, XumuxChannel } from '../channel.js';
 import { PipeMessageType, PipeResetError, pipeTarget } from './profile.js';
 
-/** Longest RESET reason sent, so a RESET always fits in one message. */
+/** Longest RESET reason sent, in UTF-8 bytes. */
 const MAX_RESET_REASON = 1024;
+/** Largest RESET body sent: the smallest maxMessageSize a peer may declare (core §3.4). */
+const MAX_RESET_BODY = 4096;
 
 const EMPTY = new Uint8Array(0);
 const noop = (): void => undefined;
@@ -249,9 +251,10 @@ export class PipeSocket extends Duplex {
       this.held = callback;
       return;
     }
-    // Queued now, so no DATA can follow it and destroy() won't send another.
+    // Queued now, so no DATA can follow it and destroy() won't send another. EOF needs no
+    // credit, and once committed it must go out, so destroy()'s abort doesn't cancel it.
     this.sentEOF = true;
-    this.channel.sendPrefix(PipeMessageType.EOF, EMPTY, this.writeAbort.signal).then(
+    this.channel.sendPrefix(PipeMessageType.EOF, EMPTY).then(
       () => {
         if (this.gotEOF) void this.channel.close(CloseCode.NORMAL).catch(noop);
         callback();
@@ -274,12 +277,9 @@ export class PipeSocket extends Duplex {
     if (!this.failure && ch.state === 'open') {
       const ending: Ending = this.ending ?? resetFor(err);
       if (ending.reset) {
-        const reason = ending.reason?.slice(0, MAX_RESET_REASON);
-        const body = reason ? { code: ending.code, reason } : { code: ending.code };
+        const { body, reason } = resetBody(ending.code, ending.reason);
         // RESET is one JSON message: send it whole, fragmented if need be (only DATA may not be).
-        void ch
-          .send(PipeMessageType.RESET, new TextEncoder().encode(JSON.stringify(body)))
-          .catch(noop);
+        void ch.send(PipeMessageType.RESET, body).catch(noop);
         void ch.close(CloseCode.GOING_AWAY, reason).catch(noop);
       } else {
         if (!this.sentEOF) {
@@ -325,6 +325,30 @@ function resetFor(err: Error | null): Ending {
   if (!err) return { reset: false, code: CloseCode.NORMAL };
   if (err instanceof PipeResetError) return { reset: true, code: err.code, reason: err.reason };
   return { reset: true, code: CloseCode.GOING_AWAY, reason: err.message };
+}
+
+/**
+ * The RESET body for `code` and `reason`, with the reason cut to MAX_RESET_REASON bytes of
+ * UTF-8 (at a character boundary) and further if JSON escaping would push the body past
+ * MAX_RESET_BODY, so every peer can receive it. Returns the reason actually sent.
+ */
+function resetBody(code: number, reason?: string): { body: Uint8Array; reason?: string } {
+  const te = new TextEncoder();
+  let r = reason ? truncateUtf8(reason, MAX_RESET_REASON) : undefined;
+  for (;;) {
+    const body = te.encode(JSON.stringify(r ? { code, reason: r } : { code }));
+    if (body.length <= MAX_RESET_BODY || !r) return { body, reason: r || undefined };
+    r = truncateUtf8(r, Math.floor(te.encode(r).length / 2));
+  }
+}
+
+/** The longest prefix of `s` whose UTF-8 encoding is at most `max` bytes. */
+function truncateUtf8(s: string, max: number): string {
+  const bytes = new TextEncoder().encode(s);
+  if (bytes.length <= max) return s;
+  let end = max;
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--; // don't split a character
+  return new TextDecoder().decode(bytes.subarray(0, end));
 }
 
 /** A RESET body; a malformed one still resets, with code 0. */

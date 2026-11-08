@@ -506,12 +506,29 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
       });
       return n;
     };
-    const p = slot.sendChain.then(run);
-    slot.sendChain = p.then(
+    if (signal?.aborted) return Promise.reject(abortReason(signal));
+    // An abort while this call waits for its turn (behind a send that is itself waiting for
+    // credit) rejects it at once; its turn then passes without sending anything. Once its
+    // turn has come, takeCredit handles the abort.
+    let gaveUp = false;
+    let onAbort = (): void => undefined;
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => {
+        gaveUp = true;
+        reject(abortReason(signal!));
+      };
+    });
+    aborted.catch(() => undefined);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const turn = slot.sendChain.then(() => {
+      signal?.removeEventListener('abort', onAbort);
+      return gaveUp ? 0 : run();
+    });
+    slot.sendChain = turn.then(
       () => undefined,
       () => undefined,
     );
-    return p;
+    return Promise.race([turn, aborted]);
   }
 
   /** @internal */

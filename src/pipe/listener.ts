@@ -110,7 +110,7 @@ export class PipeListener extends EventEmitter<PipeListenerEvents> {
   /** The next pipe. Rejects once the listener is closed. */
   accept(): Promise<PipeSocket> {
     const s = this.backlog.shift();
-    if (s) return Promise.resolve(s);
+    if (s) return Promise.resolve(this.handOver(s));
     if (this.closed) return Promise.reject(listenerClosed());
     return new Promise((resolve, reject) => this.waiters.push({ resolve, reject }));
   }
@@ -141,11 +141,29 @@ export class PipeListener extends EventEmitter<PipeListenerEvents> {
   }
 
   private deliver(s: PipeSocket): void {
-    if (this.listenerCount('connection') > 0) this.emit('connection', s);
-    else if (this.waiters.length > 0) this.waiters.shift()!.resolve(s);
+    if (this.listenerCount('connection') > 0) {
+      this.emit('connection', s);
+      return;
+    }
+    // Until the application has the socket, an 'error' (the peer's RESET, say) has nowhere
+    // to go and would crash the process. Hold it here; the socket still shows it in
+    // `errored` and `destroyed` once accepted.
+    s.on('error', ignore);
+    if (this.waiters.length > 0) this.waiters.shift()!.resolve(this.handOver(s));
     else this.backlog.push(s);
   }
+
+  /**
+   * Hand a socket to accept()'s caller. The guard stays until the caller's continuation has
+   * run (it can't add its own handler any sooner), then the socket's errors are theirs.
+   */
+  private handOver(s: PipeSocket): PipeSocket {
+    setImmediate(() => s.off('error', ignore));
+    return s;
+  }
 }
+
+const ignore = (): void => undefined;
 
 function listenerClosed(): Error {
   return Object.assign(new Error('pipe listener closed'), { code: 'ERR_SERVER_NOT_RUNNING' });
