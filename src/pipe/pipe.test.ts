@@ -249,9 +249,11 @@ describe('PipeSocket', () => {
     let done = false;
     a.write(big, () => (done = true));
     await later(100);
-    // The destination took one chunk and has not written it: no credit came back for it.
+    // The destination took one chunk and has not written it, and holds more in its buffer:
+    // no credit came back for any of it, so the peer sent exactly one window.
     expect(taken).toHaveLength(1);
-    expect(b.readableLength).toBe(DEFAULT_INITIAL_WINDOW - taken[0]!.length);
+    expect(slow.writableLength).toBeGreaterThan(0);
+    expect(b.readableLength + slow.writableLength).toBe(DEFAULT_INITIAL_WINDOW);
     expect(done).toBe(false);
 
     stalled = false;
@@ -282,6 +284,36 @@ describe('PipeSocket', () => {
     const { b: c } = await pipePair();
     c.setEncoding('utf8');
     await expect(c.writeTo(new Writable())).rejects.toThrow(/encoding/);
+  });
+
+  it('writeTo() on itself rejects on a RESET while its echo is blocked and bytes are unread', async () => {
+    // b grants a 1 MiB, a grants b the default 256 KiB, so a can still send its RESET.
+    const { a, b } = await pipePair({ maxChannelWindow: -1, initialWindow: 1 << 20 });
+    const echo = b.writeTo(b);
+    // a never reads, so b's echo blocks on credit while b still holds unread bytes.
+    a.write(randomBytes(512 << 10));
+    await later(100);
+    expect(b.readableLength).toBeGreaterThan(0);
+    a.destroy(new PipeResetError(4600, 'gone'));
+    const r = await Promise.race([
+      echo.then(
+        () => 'resolved',
+        (e: unknown) => e,
+      ),
+      later(2000),
+    ]);
+    expect(r).toBeInstanceOf(PipeResetError);
+    await closedWithin(b.channel, 1000);
+    expect(b.destroyed).toBe(true);
+  });
+
+  it('writeTo() rejects when the destination fails while the source is idle', async () => {
+    const { b } = await pipePair();
+    const dest = new Writable({ write: (_c, _e, cb) => cb() });
+    const copied = b.writeTo(dest);
+    await later(20);
+    dest.destroy(new Error('boom'));
+    await expect(copied).rejects.toThrow('boom');
   });
 
   it('never sends DATA larger than one frame, even for big writes', async () => {

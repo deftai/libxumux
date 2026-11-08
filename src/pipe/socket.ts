@@ -59,6 +59,8 @@ export class PipeSocket extends Duplex {
   private unwritten = 0;
   /** writeTo() is reading: what read() returns is held until written. */
   private holding = false;
+  /** Running writeTo() copies, told when the pipe fails. */
+  private readonly wakers = new Set<() => void>();
   private sentEOF = false;
   private gotEOF = false;
   /** The pipe has failed: destroy with this once the readable side has drained. */
@@ -147,9 +149,14 @@ export class PipeSocket extends Duplex {
    * Copy the readable side to `dest` until the peer's EOF, returning credit for each chunk
    * only once `dest` has written it (its write callback), not as it is read. pipe/1 asks for
    * this: credit follows writes to the local end, so a slow `dest` slows the peer exactly,
-   * where `pipe()` returns credit as soon as a chunk reaches the destination's buffer.
-   * Resolves with the bytes copied; rejects if this socket or `dest` fails. `dest` is not
-   * ended. While it runs, consume the readable side no other way, and don't set an encoding.
+   * where `pipe()` returns credit as soon as a chunk reaches the destination's buffer. It
+   * waits for `'drain'` when `dest` is full.
+   *
+   * Resolves with the bytes written once they all have been; `dest` is not ended. Rejects
+   * if this socket fails (after the bytes that came before the failure have been passed to
+   * `dest`) or `dest` fails. Errors on either stream reject the copy rather than going
+   * unhandled while it runs. Meanwhile, consume the readable side no other way, and don't
+   * set an encoding.
    *
    * ```ts
    * await socket.writeTo(socket); // an echo
@@ -161,46 +168,75 @@ export class PipeSocket extends Duplex {
       throw new Error('writeTo() needs a socket without an encoding');
     if (this.readableFlowing) throw new Error('writeTo() needs a paused socket');
     let total = 0;
-    for (;;) {
-      if (this.readableEnded) return total;
-      if (this.destroyed) throw this.errored ?? new Error('pipe destroyed');
-      this.holding = true;
-      let chunk: Buffer | null;
-      try {
-        chunk = this.read() as Buffer | null;
-      } finally {
-        this.holding = false;
+    let pending = 0;
+    // In an object: TypeScript doesn't see the callbacks' assignments to a plain variable.
+    const failed: { dest: Error | null } = { dest: null };
+    let wake: (() => void) | null = null;
+    const poke = (): void => {
+      const w = wake;
+      wake = null;
+      w?.();
+    };
+    const sleep = (): Promise<void> => new Promise((r) => (wake = r));
+    const onDestError = (e: Error): void => {
+      failed.dest ??= e;
+      poke();
+    };
+    const onDestClose = (): void => {
+      // A destination that closes before the copy is done fails it (unless it is this
+      // socket, whose own state says why).
+      if (dest !== this) failed.dest ??= dest.errored ?? new Error('destination closed');
+      poke();
+    };
+    const sourceEvents = ['readable', 'end', 'close', 'error'] as const;
+    for (const e of sourceEvents) this.on(e, poke);
+    this.wakers.add(poke);
+    dest.on('drain', poke);
+    dest.on('error', onDestError);
+    dest.on('close', onDestClose);
+    try {
+      for (;;) {
+        if (this.errored) throw this.errored;
+        if (failed.dest) throw failed.dest;
+        if (this.readableEnded) {
+          if (pending === 0) return total;
+        } else if (this.destroyed) {
+          throw new Error('pipe destroyed');
+        } else if (!dest.writableNeedDrain || this.failure) {
+          // After a failure, keep passing on the bytes that came before it, without
+          // waiting for a write the failure holds (this socket as its own destination).
+          this.holding = true;
+          let chunk: Buffer | null;
+          try {
+            chunk = this.read() as Buffer | null;
+          } finally {
+            this.holding = false;
+          }
+          if (chunk !== null) {
+            const n = chunk.length;
+            pending++;
+            dest.write(chunk, (e) => {
+              pending--;
+              if (e) failed.dest ??= e;
+              else {
+                this.unwritten -= n;
+                total += n;
+                this.settle();
+              }
+              poke();
+            });
+            continue;
+          }
+        }
+        await sleep();
       }
-      if (chunk === null) {
-        await this.readableOrEnd();
-        continue;
-      }
-      const n = chunk.length;
-      await new Promise<void>((resolve, reject) =>
-        dest.write(chunk, (e) => {
-          if (e) return reject(e);
-          this.unwritten -= n;
-          this.settle();
-          resolve();
-        }),
-      );
-      total += n;
+    } finally {
+      for (const e of sourceEvents) this.off(e, poke);
+      this.wakers.delete(poke);
+      dest.off('drain', poke);
+      dest.off('error', onDestError);
+      dest.off('close', onDestClose);
     }
-  }
-
-  /** Resolve once there is more to read, the readable side has ended, or the socket closed. */
-  private readableOrEnd(): Promise<void> {
-    return new Promise((resolve) => {
-      const done = (): void => {
-        this.off('readable', done);
-        this.off('end', done);
-        this.off('close', done);
-        resolve();
-      };
-      this.on('readable', done);
-      this.on('end', done);
-      this.on('close', done);
-    });
   }
 
   override _read(): void {
@@ -285,6 +321,7 @@ export class PipeSocket extends Duplex {
     this.writeAbort.abort(err);
     if (code !== null) void this.channel.close(code, reason).catch(noop);
     this.settle();
+    for (const w of this.wakers) w();
   }
 
   // ─── Writable side ──────────────────────────────────────────────────────────
