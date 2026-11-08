@@ -64,18 +64,20 @@ await client.close();
 
 ### Options
 
-| Option                         | Default   |                                                                                                        |
-| ------------------------------ | --------- | ------------------------------------------------------------------------------------------------------ |
-| `maxFramePayload`              | 65536     | Largest frame payload this side accepts                                                                |
-| `maxMessageSize`               | 262144    | Largest reassembled message this side accepts                                                          |
-| `initialWindow`                | 262144    | Initial credit granted per channel (must be ≥ `maxMessageSize`)                                        |
-| `maxChannelWindow`             | 16 MiB    | How far auto-tuning may grow one channel's receive window. Negative, or ≤ `initialWindow`, disables it |
-| `connectionWindow`             | 64 MiB    | Stop growing windows once their sum on the connection reaches this                                     |
-| `pingInterval` / `pingTimeout` | 30 / 10 s | Keepalive. `pingInterval: 0` disables it                                                               |
-| `fragmentSize`                 | 16384     | Fragment size for fair interleaving between channels                                                   |
-| `handshakeTimeoutMs`           | 10000     | HELLO timeout (server) / WELCOME timeout (client)                                                      |
-| `closeTimeoutMs`               | 5000      | How long CLOSE waits for the peer's CLOSE                                                              |
-| `onChannelRequest`             | refuse    | Policy for channels the peer opens                                                                     |
+| Option                         | Default   |                                                                                                                  |
+| ------------------------------ | --------- | ---------------------------------------------------------------------------------------------------------------- |
+| `maxFramePayload`              | 65536     | Largest frame payload this side accepts                                                                          |
+| `maxMessageSize`               | 262144    | Largest reassembled message this side accepts                                                                    |
+| `initialWindow`                | 262144    | Initial credit granted per channel (must be ≥ `maxMessageSize`)                                                  |
+| `maxChannelWindow`             | 16 MiB    | How far auto-tuning may grow one channel's receive window. Negative, or ≤ `initialWindow`, disables it           |
+| `connectionWindow`             | 64 MiB    | Stop growing windows once their sum on the connection reaches this                                               |
+| `maxChannels`                  | 1024      | Channels open or being opened on the connection; the peer's opens past this get 4002                             |
+| `maxControlQueue`              | 1 MiB     | Bytes of queued control/probe replies before a peer that isn't reading is disconnected with 4004 (negative: off) |
+| `pingInterval` / `pingTimeout` | 30 / 10 s | Keepalive. `pingInterval: 0` disables it                                                                         |
+| `fragmentSize`                 | 16384     | Fragment size for fair interleaving between channels                                                             |
+| `handshakeTimeoutMs`           | 10000     | HELLO timeout (server) / WELCOME timeout (client)                                                                |
+| `closeTimeoutMs`               | 5000      | How long CLOSE waits for the peer's CLOSE                                                                        |
+| `onChannelRequest`             | refuse    | Policy for channels the peer opens                                                                               |
 
 ### Receive windows
 
