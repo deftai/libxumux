@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `conformance/adapter.mjs` runs libxumux as the server under test for the xumux behavioural conformance suite (deftai/xumux `conformance/behaviour`): `XUMUX_DIR=path/to/xumux npm run test:conformance`. All 48 core scenarios pass; the pipe/1 ones are skipped until pipe/1 support lands.
+
 ## [0.3.1] - 2026-11-08
 
 ### Security
