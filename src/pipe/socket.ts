@@ -182,7 +182,11 @@ export class PipeSocket extends Duplex {
       failed.dest ??= e;
       poke();
     };
+    // Which streams have emitted 'close' (`closed` turns true before then).
+    const closeSeen = new Set<Writable>();
+    const onSourceClose = (): void => void closeSeen.add(this);
     const onDestClose = (): void => {
+      closeSeen.add(dest);
       // A destination that closes before the copy is done fails it (unless it is this
       // socket, whose own state says why).
       if (dest !== this) failed.dest ??= dest.errored ?? new Error('destination closed');
@@ -190,6 +194,7 @@ export class PipeSocket extends Duplex {
     };
     const sourceEvents = ['readable', 'end', 'close', 'error'] as const;
     for (const e of sourceEvents) this.on(e, poke);
+    this.on('close', onSourceClose);
     this.wakers.add(poke);
     dest.on('drain', poke);
     dest.on('error', onDestError);
@@ -231,11 +236,15 @@ export class PipeSocket extends Duplex {
         await sleep();
       }
     } finally {
-      for (const e of sourceEvents) this.off(e, poke);
+      for (const e of sourceEvents) if (e !== 'error') this.off(e, poke);
+      this.off('close', onSourceClose);
       this.wakers.delete(poke);
       dest.off('drain', poke);
-      dest.off('error', onDestError);
       dest.off('close', onDestClose);
+      // A failed stream emits 'error' after the copy has seen the failure: keep the copy's
+      // handler until then, since the rejection has already reported the error.
+      offErrorAfterClose(this, poke, closeSeen.has(this));
+      offErrorAfterClose(dest, onDestError, closeSeen.has(dest));
     }
   }
 
@@ -420,6 +429,15 @@ export class PipeSocket extends Duplex {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
   }
+}
+
+/**
+ * Remove an 'error' listener now, or, if `s` has failed but not yet emitted 'close', once it
+ * has: a failed stream emits 'error' just before 'close'.
+ */
+function offErrorAfterClose(s: Writable, fn: (err: Error) => void, closeSeen: boolean): void {
+  if (s.errored && !closeSeen) s.once('close', () => s.off('error', fn));
+  else s.off('error', fn);
 }
 
 /** How destroy(err) ends the pipe: RESET for an error, else EOF and 1000. */

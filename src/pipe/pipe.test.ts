@@ -307,6 +307,19 @@ describe('PipeSocket', () => {
     expect(b.destroyed).toBe(true);
   });
 
+  it("writeTo() leaves no 'error' unhandled when a RESET ends the copy", async () => {
+    const ss = await sessions();
+    // No 'error' listeners on either end: the copy's rejection is the only report.
+    const [a, b] = await Promise.all([dialPipe(ss.client, { name: 'test' }), ss.listener.accept()]);
+    await later(10); // past the listener's hand-over guard
+    const echo = b.writeTo(b);
+    await write(a, 'x');
+    a.resetAndDestroy(4600, 'gone');
+    await expect(echo).rejects.toBeInstanceOf(PipeResetError);
+    await later(50);
+    expect(b.destroyed).toBe(true);
+  });
+
   it('writeTo() rejects when the destination fails while the source is idle', async () => {
     const { b } = await pipePair();
     const dest = new Writable({ write: (_c, _e, cb) => cb() });
