@@ -124,7 +124,13 @@ const socket = await dialPipe(client, { name: 'ssh', target: 'tcp:localhost:22' 
 | Other types   | The channel closes with 1002, and the socket is destroyed with an error.                                                                                                                                         |
 | Channel close | 1000 once both EOFs are sent and received; 1001 after a RESET. `destroy()` sends EOF and closes at once, like closing a socket.                                                                                  |
 
-Flow control follows the consumer: credit goes back to the peer only as bytes leave the readable side (`read()`, `'data'`, `pipe()`, async iteration), so a consumer that stops reading stops the peer's writer once the window is full. To return credit only once bytes have reached their destination, as pipe/1 asks of a relay, copy with `socket.writeTo(dest)` instead of `pipe()`: it gives credit back for each chunk when `dest`'s write completes, not when the chunk reaches `dest`'s buffer, and resolves at the peer's EOF without ending `dest`. `setTimeout()`, `setNoDelay()`, `setKeepAlive()`, `ref()` and `unref()` exist for `net.Socket` compatibility.
+Flow control follows the consumer, as pipe/1 requires: credit goes back to the peer only as bytes are consumed, so a consumer that stops stops the peer's writer once the window is full. How a byte counts as consumed depends on how the socket is read:
+
+- `pipe()` and `stream.pipeline()` (which calls `pipe()`): when the destination has written the byte (its write callback), not when the byte reaches the destination's buffer. A slow destination slows the peer exactly, with no buffering in between.
+- `socket.writeTo(dest)`: the same, as a promise that resolves at the peer's EOF and leaves `dest` open.
+- `read()`, `'data'` and async iteration: when the byte leaves the readable side. Nothing is written downstream there, so taking the byte is the consumption.
+
+A socket pipes to one destination at a time. With `setEncoding()`, `pipe()` falls back to `Readable.pipe()`, which returns credit as chunks are read. `setTimeout()`, `setNoDelay()`, `setKeepAlive()`, `ref()` and `unref()` exist for `net.Socket` compatibility.
 
 HTTP over pipes: emit the listener's sockets into an `http.Server`, and give the client's agent a `createConnection` that dials a pipe:
 

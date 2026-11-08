@@ -30,9 +30,9 @@ const behaviours = {
   'pipe-echo': async (ch) => {
     const socket = new PipeSocket(ch);
     socket.on('error', () => undefined);
-    // Credit for each chunk goes back only once its echo is written (pipe/1).
-    await socket.writeTo(socket);
-    socket.end();
+    // pipe() returns credit for each chunk only once its echo is written (pipe/1), and ends
+    // the socket (EOF) after the peer's EOF.
+    socket.pipe(socket);
   },
 };
 
