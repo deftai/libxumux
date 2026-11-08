@@ -228,6 +228,73 @@ describe('BasePath', () => {
     expect(a.ends).toHaveLength(0);
   });
 
+  it('a sink started from a frame handler gets the rest of the chunk at once', async () => {
+    const s = scripted();
+    const p = new BasePath(s.t, 65536);
+    const second = collector();
+    p.start({ frame: () => p.start(second), end: () => undefined });
+    s.push(
+      cat(
+        new Uint8Array(XMUX_MAGIC),
+        encodeFrame(data(1, 'a')),
+        encodeFrame(data(3, 'b')),
+        encodeFrame(data(5, 'c')),
+      ),
+    );
+    // No further read is needed (the peer may be waiting for a reply).
+    await waitUntil(() => second.frames.length === 2);
+    expect(second.frames.map((f) => td.decode(f.payload))).toEqual(['b', 'c']);
+  });
+
+  it('checks frames read before a hand-off against the new limit', async () => {
+    const s = scripted();
+    const p = new BasePath(s.t, 65536);
+    p.start({ frame: () => p.pause(), end: () => undefined });
+    s.push(
+      cat(
+        new Uint8Array(XMUX_MAGIC),
+        encodeFrame(data(1, 'first')),
+        encodeFrame({ channel: 1, type: 1, flags: 0, payload: new Uint8Array(5000) }),
+      ),
+    );
+    await new Promise((r) => setTimeout(r, 5));
+    p.setMaxFramePayload(4096);
+    const next = collector();
+    p.start(next);
+    await waitUntil(() => next.ends.length === 1);
+    expect(next.frames).toHaveLength(0);
+    expect((next.ends[0] as { parseError: XumuxProtocolError }).parseError.code).toBe(
+      CloseCode.MESSAGE_TOO_LARGE,
+    );
+  });
+
+  it('releases the reader after a parse error, and when a paused path is closed', async () => {
+    for (const how of ['parse', 'paused'] as const) {
+      const s = scripted('message');
+      const ret = vi.fn(() => Promise.resolve({ done: true as const, value: undefined }));
+      const it0 = s.t.receive()[Symbol.asyncIterator]();
+      const p = new BasePath(
+        {
+          ...s.t,
+          receive: () => ({
+            [Symbol.asyncIterator]: () => ({ next: () => it0.next(), return: ret }),
+          }),
+        },
+        65536,
+      );
+      const c = collector();
+      p.start({ ...c, frame: (f) => (c.frames.push(f), how === 'paused' && p.pause()) });
+      s.push(how === 'parse' ? new Uint8Array(3) : encodeFrame(data(1, 'x')));
+      if (how === 'parse') await waitUntil(() => c.ends.length === 1);
+      else {
+        await waitUntil(() => c.frames.length === 1);
+        await new Promise((r) => setTimeout(r, 1));
+        p.close();
+      }
+      expect(ret).toHaveBeenCalledTimes(1);
+    }
+  });
+
   it('close() closes the transport once, stops delivering and releases the reader', async () => {
     const s = scripted();
     const ret = vi.fn(() => Promise.resolve({ done: true as const, value: undefined }));
@@ -365,6 +432,38 @@ describe('session seam: detaching and attaching the base path', () => {
     s.end(new Error('ECONNRESET'));
     expect((await cd).reason).toBe('transport failed: ECONNRESET');
     expect(s.closes()).toBe(1);
+  });
+
+  it('a write that never finishes on the lost transport does not hold up later sends', async () => {
+    const [ct, st] = createInMemoryPair('message');
+    let stall = false;
+    const stalling: TransportAdapter = {
+      kind: 'message',
+      send: (d) => (stall ? new Promise<void>(() => undefined) : ct.send(d)),
+      receive: () => ct.receive(),
+      close: () => ct.close(),
+    };
+    const client = new KeepingClient(stalling, opts);
+    const server = new KeepingServer(st, opts);
+    const [c, s] = await Promise.all([
+      client.connect({ channels: [{ name: 'x', reliable: true, ordered: true }] }),
+      server.accept(),
+    ]);
+    stall = true;
+    const stuck = c.channels[0]!.send(1, te.encode('stuck'));
+    const after = c.channels[0]!.send(1, te.encode('after'));
+    await new Promise((r) => setTimeout(r, 5));
+    const sd = detachEvent(server);
+    ct.close();
+    await sd;
+    await waitUntil(() => client.detached);
+    await expect(stuck).rejects.toThrow(/base path lost/);
+    const [ct2, st2] = createInMemoryPair('message');
+    client.attach(ct2);
+    server.attach(st2);
+    await after;
+    expect(td.decode((await s.channels[0]!.receive())!.payload)).toBe('after');
+    await client.close();
   });
 
   it('detaches on a write error, keeping the frames still queued', async () => {

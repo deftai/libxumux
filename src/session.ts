@@ -1041,6 +1041,10 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     if (!path) return;
     this.path = null;
     path.close();
+    // A write that never finishes on the dead transport must not hold up its channel's sends.
+    const stuck = path.inFlight as Out | null;
+    path.inFlight = null;
+    stuck?.reject(new Error(`base path lost: ${reason}`));
     this.stopKeepalive();
     this.keepalivePingAt = null;
     const err = new Error(`base path lost: ${reason}`);
@@ -1573,6 +1577,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
       // Stop as soon as the path is detached: what is still queued waits for the next one.
       for (let out = this.next(); out; out = this.path === path ? this.next() : undefined) {
         try {
+          path.inFlight = out;
           const r = path.write(out.bytes);
           if (r) await r;
           out.resolve();
@@ -1589,6 +1594,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
         }
       }
     } finally {
+      path.inFlight = null;
       path.pumping = false;
       if (this.path === path || !this.path) {
         const ws = this.idleWaiters;

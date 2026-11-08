@@ -13,8 +13,9 @@
  * @module base-path
  */
 
-import { XMUX_MAGIC } from './codec/constants.js';
-import { decodeFrame, StreamFramer } from './codec/decode-frame.js';
+import { CloseCode, XMUX_MAGIC } from './codec/constants.js';
+import { decodeFrame, payloadLimit, StreamFramer } from './codec/decode-frame.js';
+import { XumuxProtocolError } from './errors.js';
 import type { Frame } from './codec/frame.js';
 import type { TransportAdapter } from './types.js';
 import { ignore } from './ignore.js';
@@ -46,6 +47,8 @@ export class BasePath {
   private closedFlag = false;
   /** @internal The session's outbound pump is writing to this path. */
   pumping = false;
+  /** @internal The session's frame being written, if any. */
+  inFlight: unknown = null;
 
   constructor(
     readonly transport: TransportAdapter,
@@ -108,18 +111,49 @@ export class BasePath {
     } catch {
       /* already closed */
     }
+    // A running loop releases the reader once its read returns; a stopped one cannot.
+    if (!this.reading) this.release();
+  }
+
+  /** Let the transport's reader clean up (for example release a stream lock). */
+  private release(): void {
+    const it = this.iter;
+    this.iter = null;
+    void it?.return?.().catch(ignore);
+  }
+
+  /** The next frame to deliver, checked against the current limit (it may have been read under another). */
+  private nextPending(): Frame | undefined {
+    const f = this.pending.shift();
+    if (f && f.payload.length > payloadLimit(f.channel, this.maxFramePayload)) {
+      this.pending.length = 0;
+      this.ended = {
+        parseError: new XumuxProtocolError(
+          CloseCode.MESSAGE_TOO_LARGE,
+          `frame payload ${f.payload.length} exceeds limit`,
+        ),
+      };
+      return undefined;
+    }
+    return f;
   }
 
   private async loop(first: BasePathSink): Promise<void> {
     let sink: BasePathSink | null = first;
     for (;;) {
       while (this.pending.length > 0 && sink && sink === this.sink && !this.closedFlag) {
-        sink.frame(this.pending.shift()!);
+        const f = this.nextPending();
+        if (f) sink.frame(f);
       }
       if (this.closedFlag) {
         this.reading = false;
-        void this.iter?.return?.().catch(ignore);
+        this.release();
         return;
+      }
+      if (sink !== this.sink && this.sink && this.pending.length > 0) {
+        // A frame handler started another sink: it gets the rest of this chunk first.
+        sink = this.sink;
+        continue;
       }
       sink = this.sink;
       if (!sink) {
@@ -130,6 +164,7 @@ export class BasePath {
       if (this.ended) {
         this.reading = false;
         this.sink = null;
+        if ('parseError' in this.ended) this.release(); // nothing more will be read
         sink.end(this.ended);
         return;
       }
@@ -147,7 +182,8 @@ export class BasePath {
       }
       if (this.closedFlag) continue;
       try {
-        if (this.framer) this.pending.push(...this.framer.push(r.value));
+        // One push per frame: a chunk can hold more frames than a call can take arguments.
+        if (this.framer) for (const f of this.framer.push(r.value)) this.pending.push(f);
         else this.pending.push(decodeFrame(r.value, this.maxFramePayload));
       } catch (e) {
         // Frames from earlier chunks are still delivered, then the error.
