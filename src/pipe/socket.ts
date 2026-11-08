@@ -3,7 +3,7 @@
  * @module pipe/socket
  */
 
-import { Duplex } from 'node:stream';
+import { Duplex, type Writable } from 'node:stream';
 import { CloseCode } from '../codec/constants.js';
 import type { ChannelMessage, XumuxChannel } from '../channel.js';
 import { PipeMessageType, PipeResetError, pipeTarget } from './profile.js';
@@ -55,6 +55,10 @@ export class PipeSocket extends Duplex {
   /** Bytes pushed to the readable side, and bytes of credit returned for them. */
   private pushed = 0;
   private returned = 0;
+  /** Bytes {@link writeTo} has taken out but its destination has not yet written. */
+  private unwritten = 0;
+  /** writeTo() is reading: what read() returns is held until written. */
+  private holding = false;
   private sentEOF = false;
   private gotEOF = false;
   /** The pipe has failed: destroy with this once the readable side has drained. */
@@ -134,8 +138,69 @@ export class PipeSocket extends Duplex {
   /** Every way of consuming the readable side goes through read(): credit follows it. */
   override read(size?: number): string | Buffer | null {
     const chunk = super.read(size) as string | Buffer | null;
+    if (this.holding && chunk !== null) this.unwritten += Buffer.byteLength(chunk);
     this.settle();
     return chunk;
+  }
+
+  /**
+   * Copy the readable side to `dest` until the peer's EOF, returning credit for each chunk
+   * only once `dest` has written it (its write callback), not as it is read. pipe/1 asks for
+   * this: credit follows writes to the local end, so a slow `dest` slows the peer exactly,
+   * where `pipe()` returns credit as soon as a chunk reaches the destination's buffer.
+   * Resolves with the bytes copied; rejects if this socket or `dest` fails. `dest` is not
+   * ended. While it runs, consume the readable side no other way, and don't set an encoding.
+   *
+   * ```ts
+   * await socket.writeTo(socket); // an echo
+   * socket.end();
+   * ```
+   */
+  async writeTo(dest: Writable): Promise<number> {
+    if (this.readableEncoding !== null)
+      throw new Error('writeTo() needs a socket without an encoding');
+    if (this.readableFlowing) throw new Error('writeTo() needs a paused socket');
+    let total = 0;
+    for (;;) {
+      if (this.readableEnded) return total;
+      if (this.destroyed) throw this.errored ?? new Error('pipe destroyed');
+      this.holding = true;
+      let chunk: Buffer | null;
+      try {
+        chunk = this.read() as Buffer | null;
+      } finally {
+        this.holding = false;
+      }
+      if (chunk === null) {
+        await this.readableOrEnd();
+        continue;
+      }
+      const n = chunk.length;
+      await new Promise<void>((resolve, reject) =>
+        dest.write(chunk, (e) => {
+          if (e) return reject(e);
+          this.unwritten -= n;
+          this.settle();
+          resolve();
+        }),
+      );
+      total += n;
+    }
+  }
+
+  /** Resolve once there is more to read, the readable side has ended, or the socket closed. */
+  private readableOrEnd(): Promise<void> {
+    return new Promise((resolve) => {
+      const done = (): void => {
+        this.off('readable', done);
+        this.off('end', done);
+        this.off('close', done);
+        resolve();
+      };
+      this.on('readable', done);
+      this.on('end', done);
+      this.on('close', done);
+    });
   }
 
   override _read(): void {
@@ -202,7 +267,7 @@ export class PipeSocket extends Duplex {
   private settle(): void {
     // With setEncoding, readableLength counts characters, not bytes, so this can run ahead of
     // the consumer by up to the buffered bytes. It never returns more than was received.
-    const consumed = this.pushed - this.readableLength;
+    const consumed = this.pushed - this.readableLength - this.unwritten;
     if (consumed > this.returned) {
       this.channel.returnCredit(consumed - this.returned);
       this.returned = consumed;

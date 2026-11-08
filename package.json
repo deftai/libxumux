@@ -67,7 +67,7 @@
     "build": "tsup",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "test:conformance": "npm run build && python3 -I \"${XUMUX_DIR:?set XUMUX_DIR to a deftai/xumux checkout}/conformance/behaviour/run.py\" --features core -- node conformance/adapter.mjs",
+    "test:conformance": "npm run build && python3 -I \"${XUMUX_DIR:?set XUMUX_DIR to a deftai/xumux checkout}/conformance/behaviour/run.py\" -- node conformance/adapter.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
     "fmt": "prettier --write \"src/**/*.ts\"",

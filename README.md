@@ -124,7 +124,7 @@ const socket = await dialPipe(client, { name: 'ssh', target: 'tcp:localhost:22' 
 | Other types   | The channel closes with 1002, and the socket is destroyed with an error.                                                                                                                                         |
 | Channel close | 1000 once both EOFs are sent and received; 1001 after a RESET. `destroy()` sends EOF and closes at once, like closing a socket.                                                                                  |
 
-Flow control follows the consumer: credit goes back to the peer only as bytes leave the readable side (`read()`, `'data'`, `pipe()`, async iteration), so a consumer that stops reading stops the peer's writer once the window is full. `setTimeout()`, `setNoDelay()`, `setKeepAlive()`, `ref()` and `unref()` exist for `net.Socket` compatibility.
+Flow control follows the consumer: credit goes back to the peer only as bytes leave the readable side (`read()`, `'data'`, `pipe()`, async iteration), so a consumer that stops reading stops the peer's writer once the window is full. To return credit only once bytes have reached their destination, as pipe/1 asks of a relay, copy with `socket.writeTo(dest)` instead of `pipe()`: it gives credit back for each chunk when `dest`'s write completes, not when the chunk reaches `dest`'s buffer, and resolves at the peer's EOF without ending `dest`. `setTimeout()`, `setNoDelay()`, `setKeepAlive()`, `ref()` and `unref()` exist for `net.Socket` compatibility.
 
 HTTP over pipes: emit the listener's sockets into an `http.Server`, and give the client's agent a `createConnection` that dials a pipe:
 
@@ -199,6 +199,12 @@ task test           # unit + conformance tests
 task test:coverage  # with coverage thresholds
 task e2e            # WebSocket, TCP, stdio, WebRTC (needs `task build` first, for stdio)
 task fmt            # Prettier
+```
+
+The behavioural conformance suite in [`deftai/xumux/conformance/behaviour`](https://github.com/deftai/xumux/tree/main/conformance/behaviour) runs against `conformance/adapter.mjs`, covering core and pipe/1 (needs `python3`):
+
+```sh
+XUMUX_DIR=path/to/xumux npm run test:conformance
 ```
 
 `tests/fixtures/xumux-vectors.json` is copied from [`deftai/xumux/conformance/vectors.json`](https://github.com/deftai/xumux/tree/main/conformance). Update it when the spec changes.

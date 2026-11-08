@@ -54,6 +54,7 @@ export const CloseCode = {
   KEEPALIVE_TIMEOUT: 4008,
   FLOW_CONTROL_ERROR: 4009,
   CHANNEL_REFUSED: 4010,
+  BUSY: 4011,
 } as const;
 
 /** The implicit control channel. */

@@ -232,6 +232,58 @@ describe('PipeSocket', () => {
     expect(got.data.equals(input)).toBe(true);
   });
 
+  it('writeTo() returns credit only once the destination has written each chunk', async () => {
+    const { a, b } = await pipePair({ maxChannelWindow: -1 });
+    const taken: Buffer[] = [];
+    let release: () => void = () => undefined;
+    let stalled = true;
+    const slow = new Writable({
+      write(chunk: Buffer, _e, cb) {
+        taken.push(chunk);
+        if (stalled) release = cb;
+        else cb();
+      },
+    });
+    const copied = b.writeTo(slow);
+    const big = randomBytes(4 << 20);
+    let done = false;
+    a.write(big, () => (done = true));
+    await later(100);
+    // The destination took one chunk and has not written it: no credit came back for it.
+    expect(taken).toHaveLength(1);
+    expect(b.readableLength).toBe(DEFAULT_INITIAL_WINDOW - taken[0]!.length);
+    expect(done).toBe(false);
+
+    stalled = false;
+    release();
+    a.end();
+    expect(await copied).toBe(big.length);
+    expect(Buffer.concat(taken).equals(big)).toBe(true);
+    expect(done).toBe(true);
+  });
+
+  it('writeTo() itself echoes, then end() completes the half-close', async () => {
+    const { a, b } = await pipePair();
+    const echo = b.writeTo(b).then((n) => (b.end(), n));
+    const input = randomBytes(1 << 20);
+    a.end(input);
+    const got = await drain(a);
+    expect(got.err).toBeUndefined();
+    expect(got.data.equals(input)).toBe(true);
+    expect(await echo).toBe(input.length);
+  });
+
+  it("writeTo() rejects with the peer's RESET, and refuses a socket with an encoding", async () => {
+    const { a, b } = await pipePair();
+    const copied = b.writeTo(new Writable({ write: (_c, _e, cb) => cb() }));
+    await write(a, 'x');
+    a.destroy(new PipeResetError(4600, 'gone'));
+    await expect(copied).rejects.toBeInstanceOf(PipeResetError);
+    const { b: c } = await pipePair();
+    c.setEncoding('utf8');
+    await expect(c.writeTo(new Writable())).rejects.toThrow(/encoding/);
+  });
+
   it('never sends DATA larger than one frame, even for big writes', async () => {
     const { a, b } = await pipePair();
     const sizes: number[] = [];
