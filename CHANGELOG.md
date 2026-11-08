@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `libxumux/pipe`: the pipe/1 profile (one bidirectional byte stream, with half-close, per channel) as a Node `stream.Duplex`, so `stream.pipeline()`, `http` and `tls` run over a channel. `PipeSocket` maps `end()` to EOF, `destroy(err)` and `resetAndDestroy()` to RESET, the peer's RESET to a `PipeResetError`, and closes the channel after both EOFs (1000) or a RESET (1001). Unknown message types close the channel with 1002. Credit goes back to the peer only as the consumer reads, and DATA is never fragmented. `dialPipe()` opens a pipe; `PipeListener` accepts them, checking profile, reliable+ordered and an optional `check` hook for target allow-lists, with `'connection'` events, `accept()` and `for await`. Also `pipeRequest()`, `checkPipeRequest()`, `pipeTarget()` and the pipe/1 constants. Tested against libxumux-go's `pipe` package (set `LIBXUMUX_GO_DIR` to run the interop e2e test). `deft-libxumux` re-exports it as `deft-libxumux/pipe`.
+- `XumuxChannel.sendPrefix(type, payload, signal?)`: sends as much of `payload` as fits in one unfragmented frame and the free send credit, and resolves with the number of bytes sent. An abort while it waits for credit sends nothing.
+- `XumuxChannel.setManualCredit()` and `returnCredit()`: with manual credit, `receive()` no longer returns a message's credit; the application returns it once it has used the bytes.
 - `conformance/adapter.mjs` runs libxumux as the server under test for the xumux behavioural conformance suite (deftai/xumux `conformance/behaviour`): `XUMUX_DIR=path/to/xumux npm run test:conformance`. All 48 core scenarios pass; the pipe/1 ones are skipped until pipe/1 support lands.
 
 ## [0.3.1] - 2026-11-08

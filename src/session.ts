@@ -189,6 +189,14 @@ interface PendingPing {
   timer: ReturnType<typeof setTimeout>;
 }
 
+/** A send waiting for credit. `partial`: take what is free (at least 1 byte), up to n. */
+interface CreditWaiter {
+  n: number;
+  partial: boolean;
+  resolve: (got: number) => void;
+  reject: (e: Error) => void;
+}
+
 /** Per-channel session state that the channel object doesn't need to see. */
 interface ChannelSlot {
   ch: XumuxChannel;
@@ -196,7 +204,7 @@ interface ChannelSlot {
   recvClose: boolean;
   closeInfo?: ChannelCloseInfo;
   sendCredit: number;
-  creditWaiters: Array<{ n: number; resolve: () => void; reject: (e: unknown) => void }>;
+  creditWaiters: CreditWaiter[];
   recvCredit: number;
   unreturned: number;
   reasm: { type: number; parts: Uint8Array[]; size: number } | null;
@@ -263,6 +271,10 @@ export function versionsCompatible(a: Version, b: Version): boolean {
   if (a[0] !== b[0]) return false;
   return a[0] !== 0 || a[1] === b[1];
 }
+
+/** An AbortSignal's reason, as an Error. */
+const abortReason = (signal: AbortSignal): Error =>
+  signal.reason instanceof Error ? signal.reason : new Error('aborted', { cause: signal.reason });
 
 const protocolError = (msg: string): XumuxProtocolError =>
   new XumuxProtocolError(CloseCode.PROTOCOL_ERROR, msg);
@@ -459,6 +471,64 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     const p = slot.sendChain.then(run);
     slot.sendChain = p.catch(() => undefined);
     return p;
+  }
+
+  /** @internal */
+  sendPrefix(
+    ch: XumuxChannel,
+    type: number,
+    payload: Uint8Array,
+    signal?: AbortSignal,
+  ): Promise<number> {
+    const slot = this.slots.get(ch.id);
+    if (!slot || slot.ch !== ch || ch.state !== 'open' || slot.sentClose) {
+      return Promise.reject(new Error(`channel ${ch.id} is not open`));
+    }
+    if (!Number.isInteger(type) || type < 0 || type > 0xff)
+      return Promise.reject(new RangeError('type must be 0–255'));
+    const max = Math.max(
+      1,
+      Math.min(this.remote.maxFramePayload, this.options.fragmentSize ?? DEFAULT_FRAGMENT_SIZE),
+    );
+    const closed = (): boolean => slot.sentClose || ch.state !== 'open';
+    const run = async (): Promise<number> => {
+      if (signal?.aborted) throw abortReason(signal);
+      if (closed()) throw new Error(`channel ${ch.id} closed while sending`);
+      let n = Math.min(payload.length, max);
+      if (ch.properties.reliable && n > 0) n = await this.takeCredit(slot, n, true, signal);
+      if (closed()) throw new Error(`channel ${ch.id} closed while sending`);
+      // One whole frame, never MORE: the frame is encoded (copied) as it is queued.
+      await this.enqueueData(ch.id, {
+        channel: ch.id,
+        type,
+        flags: 0,
+        payload: payload.subarray(0, n),
+      });
+      return n;
+    };
+    if (signal?.aborted) return Promise.reject(abortReason(signal));
+    // An abort while this call waits for its turn (behind a send that is itself waiting for
+    // credit) rejects it at once; its turn then passes without sending anything. Once its
+    // turn has come, takeCredit handles the abort.
+    let gaveUp = false;
+    let onAbort = (): void => undefined;
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => {
+        gaveUp = true;
+        reject(abortReason(signal!));
+      };
+    });
+    aborted.catch(() => undefined);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const turn = slot.sendChain.then(() => {
+      signal?.removeEventListener('abort', onAbort);
+      return gaveUp ? 0 : run();
+    });
+    slot.sendChain = turn.then(
+      () => undefined,
+      () => undefined,
+    );
+    return Promise.race([turn, aborted]);
   }
 
   /** @internal */
@@ -1156,23 +1226,58 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
 
   // ─── Flow control ───────────────────────────────────────────────────────────
 
-  private takeCredit(slot: ChannelSlot, n: number): Promise<void> {
+  /**
+   * Wait for n bytes of send credit. With `partial`, take whatever is free once there is at
+   * least 1 byte, up to n, and resolve with the amount taken. An abort rejects with the
+   * signal's reason and takes nothing.
+   */
+  private takeCredit(
+    slot: ChannelSlot,
+    n: number,
+    partial = false,
+    signal?: AbortSignal,
+  ): Promise<number> {
     if (slot.sentClose || slot.ch.state !== 'open')
       return Promise.reject(new Error(`channel ${slot.ch.id} closed`));
-    if (slot.creditWaiters.length === 0 && slot.sendCredit >= n) {
-      slot.sendCredit -= n;
-      return Promise.resolve();
+    if (signal?.aborted) return Promise.reject(abortReason(signal));
+    if (slot.creditWaiters.length === 0 && slot.sendCredit >= (partial ? 1 : n)) {
+      const got = Math.min(n, slot.sendCredit);
+      slot.sendCredit -= got;
+      return Promise.resolve(got);
     }
-    return new Promise((resolve, reject) => slot.creditWaiters.push({ n, resolve, reject }));
+    return new Promise((resolve, reject) => {
+      const onAbort = (): void => {
+        const i = slot.creditWaiters.indexOf(w);
+        if (i < 0) return;
+        slot.creditWaiters.splice(i, 1);
+        reject(abortReason(signal!));
+        this.wakeCredit(slot);
+      };
+      const w: CreditWaiter = {
+        n,
+        partial,
+        resolve: (got) => {
+          signal?.removeEventListener('abort', onAbort);
+          resolve(got);
+        },
+        reject: (e) => {
+          signal?.removeEventListener('abort', onAbort);
+          reject(e);
+        },
+      };
+      slot.creditWaiters.push(w);
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
   }
 
   private wakeCredit(slot: ChannelSlot): void {
     while (slot.creditWaiters.length > 0) {
       const w = slot.creditWaiters[0]!;
-      if (slot.sendCredit < w.n) break;
-      slot.sendCredit -= w.n;
+      if (slot.sendCredit < (w.partial ? 1 : w.n)) break;
+      const got = Math.min(w.n, slot.sendCredit);
+      slot.sendCredit -= got;
       slot.creditWaiters.shift();
-      w.resolve();
+      w.resolve(got);
     }
   }
 
