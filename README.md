@@ -2,7 +2,7 @@
 
 TypeScript reference implementation of [xumux](https://github.com/deftai/xumux) **0.2**: named, typed channels with per-channel flow control and probes, over any transport.
 
-> **Status**: implements the xumux 0.2.0-draft core ([spec/core.md](https://github.com/deftai/xumux/blob/main/spec/core.md)) and passes its [conformance vectors](tests/fixtures/xumux-vectors.json). Not yet implemented: the `webrtc-multichannel/1` and `session-resume/1` extensions, and multi-stream QUIC.
+> **Status**: implements the xumux 0.2.0-draft core ([spec/core.md](https://github.com/deftai/xumux/blob/main/spec/core.md)) and passes its [conformance vectors](tests/fixtures/xumux-vectors.json), plus the [pipe/1 profile](#pipes-pipe1). Not yet implemented: the `webrtc-multichannel/1` and `session-resume/1` extensions, and multi-stream QUIC.
 
 ## Install
 
@@ -91,6 +91,59 @@ A channel can have at most one window of data in flight, so with a fixed window 
 - `channel.receiveWindow` reports a channel's current window.
 
 This is local policy, with no wire change, so it works with any xumux peer.
+
+## Pipes (`pipe/1`)
+
+`libxumux/pipe` implements the [pipe/1 profile](https://github.com/deftai/xumux/blob/main/spec/profiles/pipe.md): one bidirectional byte stream per channel, with half-close. A pipe is a Node `stream.Duplex` (`PipeSocket`), the analogue of a `net.Socket`, so `stream.pipeline()`, `http` and `tls` run over it. Node.js only.
+
+```ts
+import { dialPipe, PipeListener, pipeTarget } from 'libxumux/pipe';
+
+// Responder: accept pipe/1 channels, checking each target against an allow-list.
+const listener = new PipeListener({
+  check: (req) => allowed.has(pipeTarget(req)) || { code: 4010, reason: 'target not allowed' },
+});
+const server = new XumuxServer(transport, { onChannelRequest: listener.policy });
+listener.attach(server); // one listener can serve many sessions
+listener.on('connection', (socket) => {
+  const upstream = net.connect(/* from socket.target */);
+  pipeline(socket, upstream).catch(() => {});
+  pipeline(upstream, socket).catch(() => {});
+});
+// or: for await (const socket of listener) { ... }, or await listener.accept()
+
+// Opener: resolves once the peer accepts (rejects with XumuxClosedError 4010/4500 if refused).
+const socket = await dialPipe(client, { name: 'ssh', target: 'tcp:localhost:22' });
+```
+
+| pipe/1        | `PipeSocket`                                                                                                                                                                                                     |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| DATA          | `write()`. Never fragmented: each message fits in one frame and the free credit. The callback runs once the bytes are on the transport.                                                                          |
+| EOF           | `end()` sends it (half-close; reading goes on, `allowHalfOpen: true`). The peer's EOF ends the readable side.                                                                                                    |
+| RESET         | `destroy(err)` or `resetAndDestroy(code, reason)` sends it. The peer's RESET destroys the socket with a `PipeResetError` (`code`, `reason`, `remote: true`), after the bytes that came before it have been read. |
+| Other types   | The channel closes with 1002, and the socket is destroyed with an error.                                                                                                                                         |
+| Channel close | 1000 once both EOFs are sent and received; 1001 after a RESET. `destroy()` sends EOF and closes at once, like closing a socket.                                                                                  |
+
+Flow control follows the consumer: credit goes back to the peer only as bytes leave the readable side (`read()`, `'data'`, `pipe()`, async iteration), so a consumer that stops reading stops the peer's writer once the window is full. `setTimeout()`, `setNoDelay()`, `setKeepAlive()`, `ref()` and `unref()` exist for `net.Socket` compatibility.
+
+HTTP over pipes: emit the listener's sockets into an `http.Server`, and give the client's agent a `createConnection` that dials a pipe:
+
+```ts
+const web = http.createServer(handler);
+listener.on('connection', (socket) => web.emit('connection', socket));
+
+const agent = new http.Agent({ keepAlive: true });
+agent.createConnection = (_opts, cb) => {
+  dialPipe(client, { name: 'http' }).then((s) => cb(null, s), cb);
+};
+http.get({ host: 'xumux', path: '/', agent }, (res) => {
+  /* ... */
+});
+```
+
+To serve pipe/1 next to other profiles, call `listener.policy(req)` from your own `onChannelRequest` for requests where `req.metadata?.profile === 'pipe/1'`; `checkPipeRequest(req)` tells whether a request is a valid pipe/1 request. The listener only takes pipe/1 channels.
+
+Two channel primitives underpin this, and are available to any byte-stream profile: `channel.sendPrefix(type, bytes, signal?)` sends as much as fits in one unfragmented frame and the free credit, and resolves with the count; `channel.setManualCredit(true)` with `channel.returnCredit(n)` returns credit when the application has really used the bytes rather than when `receive()` hands them over.
 
 ## Transports
 

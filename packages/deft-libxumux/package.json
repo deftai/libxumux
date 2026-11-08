@@ -12,6 +12,11 @@
       "import": "./index.js",
       "require": "./index.cjs"
     },
+    "./pipe": {
+      "types": "./pipe.d.ts",
+      "import": "./pipe.js",
+      "require": "./pipe.cjs"
+    },
     "./transports/websocket": {
       "types": "./transports/websocket.d.ts",
       "import": "./transports/websocket.js",
@@ -40,6 +45,7 @@
   },
   "files": [
     "index.*",
+    "pipe.*",
     "transports",
     "README.md",
     "LICENSE"

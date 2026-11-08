@@ -38,6 +38,12 @@ export interface ChannelCloseInfo {
 /** What a channel needs from its session. Implemented by XumuxPeer. */
 export interface ChannelHost {
   sendMessage(ch: XumuxChannel, type: number, payload: Uint8Array): Promise<void>;
+  sendPrefix(
+    ch: XumuxChannel,
+    type: number,
+    payload: Uint8Array,
+    signal?: AbortSignal,
+  ): Promise<number>;
   closeChannel(ch: XumuxChannel, code: number, reason?: string): Promise<ChannelCloseInfo>;
   pingChannel(channelId: number, timeoutMs: number): Promise<number>;
   consumed(ch: XumuxChannel, bytes: number): void;
@@ -93,6 +99,7 @@ export class XumuxChannel implements AsyncIterable<ChannelMessage> {
     reject: (e: unknown) => void;
   } | null = null;
   private ended: ChannelCloseInfo | null = null;
+  private manualCredit = false;
   private resolveClosed!: (info: ChannelCloseInfo) => void;
 
   /** Resolves when the channel is fully closed. */
@@ -144,13 +151,41 @@ export class XumuxChannel implements AsyncIterable<ChannelMessage> {
   }
 
   /**
+   * Send as much of `payload` as fits in one unfragmented frame and in the free send credit,
+   * waiting until there is at least one byte of credit, and resolve with the number of bytes
+   * sent. Suits byte streams whose messages must not be fragmented, such as pipe/1 DATA: call
+   * it in a loop until all of `payload` has gone. An empty payload sends an empty message.
+   *
+   * Resolves once the frame has been handed to the transport. If `signal` aborts while the
+   * call waits for its turn or for credit, it rejects with the signal's reason and nothing is
+   * sent; once the frame is queued it is always sent whole, never in part.
+   */
+  sendPrefix(type: number, payload: Uint8Array, signal?: AbortSignal): Promise<number> {
+    return this.host.sendPrefix(this, type, payload, signal);
+  }
+
+  /**
+   * With `on`, reading a message no longer returns its flow-control credit: call
+   * {@link returnCredit} once the bytes have really been used (pipe/1 does this as its
+   * consumer takes them). Set it before the first `receive()`.
+   */
+  setManualCredit(on: boolean): void {
+    this.manualCredit = on;
+  }
+
+  /** Return flow-control credit for `bytes` consumed bytes (with {@link setManualCredit}). */
+  returnCredit(bytes: number): void {
+    if (Number.isSafeInteger(bytes) && bytes > 0) this.host.consumed(this, bytes);
+  }
+
+  /**
    * Next message, or `null` once the channel has closed normally and the inbox is empty.
    * Rejects with {@link XumuxClosedError} if the channel closed abnormally.
    */
   receive(): Promise<ChannelMessage | null> {
     const m = this.inbox.shift();
     if (m) {
-      this.host.consumed(this, m.payload.length);
+      if (!this.manualCredit) this.host.consumed(this, m.payload.length);
       return Promise.resolve(m);
     }
     if (this.ended) return this.endResult(this.ended);
@@ -183,7 +218,7 @@ export class XumuxChannel implements AsyncIterable<ChannelMessage> {
     if (this.reader) {
       const r = this.reader;
       this.reader = null;
-      this.host.consumed(this, m.payload.length);
+      if (!this.manualCredit) this.host.consumed(this, m.payload.length);
       r.resolve(m);
     } else {
       this.inbox.push(m);

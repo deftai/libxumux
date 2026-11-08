@@ -27,6 +27,11 @@
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
     },
+    "./pipe": {
+      "types": "./dist/pipe.d.ts",
+      "import": "./dist/pipe.js",
+      "require": "./dist/pipe.cjs"
+    },
     "./transports/websocket": {
       "types": "./dist/transports/websocket-adapter.d.ts",
       "import": "./dist/transports/websocket-adapter.js",
