@@ -1207,7 +1207,8 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     // A write that never finishes on the dead transport must not hold up its channel's sends.
     const stuck = path.inFlight as Out | null;
     path.inFlight = null;
-    if (stuck?.retained) stuck.resolve(); // replayed on resume, so not lost
+    if (stuck?.retained)
+      stuck.resolve(); // replayed on resume, so not lost
     else stuck?.reject(new Error(`base path lost: ${reason}`));
     this.stopKeepalive();
     this.keepalivePingAt = null;
