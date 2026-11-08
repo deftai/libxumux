@@ -4,6 +4,7 @@ import http from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import { Readable, Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { pipeline as pipelineCb } from 'node:stream';
 import { XumuxClient, XumuxServer, type XumuxOptions } from '../session.js';
 import { createInMemoryPair } from '../transports/in-memory-adapter.js';
 import { CloseCode, DEFAULT_INITIAL_WINDOW } from '../codec/constants.js';
@@ -110,6 +111,43 @@ function drain(s: PipeSocket): Promise<{ data: Buffer; err?: Error }> {
   });
 }
 
+/**
+ * Count the credit `s` returns. With `written`, also count the times the credit returned
+ * runs ahead of the bytes the destination has written.
+ */
+function creditLog(s: PipeSocket, written?: () => number) {
+  const log = { returned: 0, violations: 0 };
+  const ch = s.channel;
+  const orig = ch.returnCredit.bind(ch);
+  ch.returnCredit = (n: number) => {
+    log.returned += n;
+    if (written && log.returned > written()) log.violations++;
+    orig(n);
+  };
+  return log;
+}
+
+/** A Writable that completes each write after `delayMs`, with a small buffer. */
+function slowSink(delayMs: number) {
+  const sink = {
+    written: 0,
+    chunks: [] as Buffer[],
+    stream: new Writable({
+      highWaterMark: 1024,
+      write(chunk: Buffer, _e, cb) {
+        const done = () => {
+          sink.chunks.push(chunk);
+          sink.written += chunk.length;
+          cb();
+        };
+        if (delayMs > 0) setTimeout(done, delayMs);
+        else done();
+      },
+    }),
+  };
+  return sink;
+}
+
 /** Ignore a socket's 'error' event (a test that checks the error another way). */
 const quiet = <T extends PipeSocket>(s: T): T => s.on('error', () => undefined);
 
@@ -193,8 +231,9 @@ describe('PipeSocket', () => {
     expect(hash.digest('hex')).toBe(createHash('sha256').update(big).digest('hex'));
   });
 
-  it('with pipe(), a stalled destination stops the writer at the window', async () => {
+  it('with pipe(), a stalled destination stops the writer at the window, without credit for what it holds', async () => {
     const { a, b } = await pipePair({ maxChannelWindow: -1 });
+    const credit = creditLog(b);
     // A destination that takes one chunk and then never completes the write.
     const taken: Buffer[] = [];
     let release: () => void = () => undefined;
@@ -209,17 +248,210 @@ describe('PipeSocket', () => {
     let done = false;
     a.write(Buffer.alloc(4 << 20), () => (done = true));
     await later(100);
-    // Credit went back for the chunk the destination took, and no more.
+    // The destination took one chunk and has not written it: no credit came back.
     expect(taken).toHaveLength(1);
-    expect(b.readableLength).toBe(DEFAULT_INITIAL_WINDOW);
+    expect(credit.returned).toBe(0);
+    expect(b.readableLength).toBe(DEFAULT_INITIAL_WINDOW - taken[0]!.length);
     expect(done).toBe(false);
-    slow.on('drain', () => undefined);
+    // Once it is written, its credit goes back.
     b.unpipe(slow);
     release();
+    expect(credit.returned).toBe(taken[0]!.length);
     b.resume();
     a.end();
     await once(b, 'end');
     expect(done).toBe(true);
+  });
+
+  for (const [how, run] of [
+    ['pipe()', (b: PipeSocket, d: Writable) => void b.pipe(d)],
+    ['stream.pipeline()', (b: PipeSocket, d: Writable) => void pipelineCb(b, d, () => undefined)],
+    ['stream/promises pipeline()', (b: PipeSocket, d: Writable) => void pipeline(b, d)],
+  ] as const) {
+    it(`${how}: credit never runs ahead of what a slow destination has written`, async () => {
+      const { a, b } = await pipePair({ maxChannelWindow: -1 });
+      const sink = slowSink(2);
+      const credit = creditLog(b, () => sink.written);
+      run(b, sink.stream);
+      const input = randomBytes(1 << 20);
+      a.end(input);
+      await once(sink.stream, 'finish');
+      expect(Buffer.concat(sink.chunks).equals(input)).toBe(true);
+      expect(credit.violations).toBe(0);
+      expect(credit.returned).toBe(input.length);
+    });
+  }
+
+  it('stream.pipeline() goes through PipeSocket.pipe()', async () => {
+    const { a, b } = await pipePair();
+    const calls: unknown[] = [];
+    const pipe = b.pipe.bind(b);
+    b.pipe = ((d: Writable, o?: { end?: boolean }) => (calls.push(o), pipe(d, o))) as typeof b.pipe;
+    const sink = slowSink(0);
+    const done = pipeline(b, sink.stream);
+    a.end('x');
+    await done;
+    expect(calls).toEqual([{ end: false }]);
+  });
+
+  it('pipe() ends the destination after the EOF, unless { end: false }', async () => {
+    const { a, b } = await pipePair();
+    const ended = slowSink(0);
+    let piped: unknown = null;
+    ended.stream.on('pipe', (src) => (piped = src));
+    b.pipe(ended.stream);
+    expect(piped).toBe(b);
+    a.end('hello');
+    await once(ended.stream, 'finish');
+    expect(Buffer.concat(ended.chunks).toString()).toBe('hello');
+
+    const { a: c, b: d } = await pipePair();
+    const open = slowSink(0);
+    expect(d.pipe(open.stream, { end: false })).toBe(open.stream);
+    c.end('world');
+    await once(d, 'end');
+    await later(20);
+    expect(Buffer.concat(open.chunks).toString()).toBe('world');
+    expect(open.stream.writableEnded).toBe(false);
+  });
+
+  it('unpipe() stops the copy, and unread bytes stay unread, without credit', async () => {
+    const { a, b } = await pipePair({ maxChannelWindow: -1 });
+    const credit = creditLog(b);
+    const sink = slowSink(0);
+    let unpiped: unknown = null;
+    sink.stream.on('unpipe', (src) => (unpiped = src));
+    b.pipe(sink.stream);
+    await write(a, Buffer.alloc(1000));
+    await later(20);
+    expect(credit.returned).toBe(1000);
+    b.unpipe(sink.stream);
+    expect(unpiped).toBe(b);
+    await write(a, Buffer.alloc(500));
+    await later(20);
+    expect(b.readableLength).toBe(500);
+    expect(credit.returned).toBe(1000);
+    expect(sink.written).toBe(1000);
+    // It can be piped again.
+    b.pipe(sink.stream);
+    await later(20);
+    expect(sink.written).toBe(1500);
+    expect(credit.returned).toBe(1500);
+  });
+
+  it('pause() holds a pipe, without credit, until resume()', async () => {
+    const { a, b } = await pipePair({ maxChannelWindow: -1 });
+    const credit = creditLog(b);
+    const sink = slowSink(0);
+    b.pipe(sink.stream);
+    await write(a, Buffer.alloc(100));
+    await later(20);
+    expect(sink.written).toBe(100);
+    b.pause();
+    expect(b.isPaused()).toBe(true);
+    await write(a, Buffer.alloc(200));
+    await later(20);
+    expect(sink.written).toBe(100);
+    expect(credit.returned).toBe(100);
+    expect(b.readableLength).toBe(200);
+    b.resume();
+    await later(20);
+    expect(sink.written).toBe(300);
+    expect(credit.returned).toBe(300);
+  });
+
+  it("emits 'unpipe' once however the pipe stops", async () => {
+    const count = (w: Writable) => {
+      const n = { unpipe: 0 };
+      w.on('unpipe', () => n.unpipe++);
+      return n;
+    };
+    // The peer's EOF (the destination is ended), and the same with { end: false }.
+    for (const end of [true, false]) {
+      const { a, b } = await pipePair();
+      const sink = slowSink(0);
+      const n = count(sink.stream);
+      b.pipe(sink.stream, { end });
+      a.end('x');
+      await new Promise((r) => b.once('end', r));
+      await later(20);
+      expect(n.unpipe).toBe(1);
+      expect(sink.stream.writableEnded).toBe(end);
+    }
+    // The destination fails, or is ended by someone else.
+    const { a, b } = await pipePair();
+    const bad = new Writable({ write: (_c, _e, cb) => cb(new Error('disk full')) });
+    bad.on('error', () => undefined);
+    const nb = count(bad);
+    b.pipe(bad);
+    await write(a, 'x');
+    await later(20);
+    expect(nb.unpipe).toBe(1);
+    const { b: c } = await pipePair();
+    const sink = slowSink(0);
+    const nc = count(sink.stream);
+    c.pipe(sink.stream);
+    sink.stream.end();
+    await later(20);
+    expect(nc.unpipe).toBe(1);
+    // unpipe() itself, and then nothing more.
+    const { a: d, b: e } = await pipePair();
+    const s2 = slowSink(0);
+    const nd = count(s2.stream);
+    e.pipe(s2.stream);
+    e.unpipe(s2.stream);
+    d.end('x');
+    await later(20);
+    expect(nd.unpipe).toBe(1);
+  });
+
+  it('pipe() stops at a destination error, which reaches its listeners', async () => {
+    const { a, b } = await pipePair({ maxChannelWindow: -1 });
+    const credit = creditLog(b);
+    const bad = new Writable({ write: (_c, _e, cb) => cb(new Error('disk full')) });
+    const errors: Error[] = [];
+    bad.on('error', (e) => errors.push(e));
+    b.pipe(bad);
+    await write(a, Buffer.alloc(1000));
+    await later(20);
+    expect(errors.map((e) => e.message)).toEqual(['disk full']);
+    expect(credit.returned).toBe(0);
+    // The copy has stopped: the bytes wait, unread, and b can be read another way.
+    a.write(Buffer.alloc(10));
+    await later(20);
+    expect(b.readableLength).toBe(10);
+  });
+
+  it("pipe() leaves the source's RESET to its own listeners, and doesn't end the destination", async () => {
+    const { a, b } = await pipePair();
+    const sink = slowSink(0);
+    const errors: Error[] = [];
+    b.on('error', (e) => errors.push(e));
+    b.pipe(sink.stream);
+    await write(a, 'x');
+    const closed = new Promise((r) => b.once('close', r));
+    a.resetAndDestroy(4600, 'gone');
+    await closed;
+    expect(errors[0]).toBeInstanceOf(PipeResetError);
+    expect(Buffer.concat(sink.chunks).toString()).toBe('x');
+    expect(sink.stream.writableEnded).toBe(false);
+  });
+
+  it('stream.pipeline() rejects with the RESET and destroys the destination', async () => {
+    const { a, b } = await pipePair();
+    const sink = slowSink(0);
+    const done = pipeline(b, sink.stream);
+    await write(a, 'x');
+    a.resetAndDestroy(4600, 'gone');
+    await expect(done).rejects.toBeInstanceOf(PipeResetError);
+    expect(sink.stream.destroyed).toBe(true);
+  });
+
+  it('pipes to one destination at a time', async () => {
+    const { b } = await pipePair();
+    b.pipe(slowSink(0).stream);
+    expect(() => b.pipe(slowSink(0).stream)).toThrow(/one destination/);
+    await expect(b.writeTo(slowSink(0).stream)).rejects.toThrow(/one destination/);
   });
 
   it('runs stream.pipeline both ways (an echo)', async () => {
@@ -230,6 +462,106 @@ describe('PipeSocket', () => {
     const [, got] = await Promise.all([pipeline(Readable.from(chunks), a), drain(a), echo]);
     expect(got.err).toBeUndefined();
     expect(got.data.equals(input)).toBe(true);
+  });
+
+  it('writeTo() returns credit only once the destination has written each chunk', async () => {
+    const { a, b } = await pipePair({ maxChannelWindow: -1 });
+    const taken: Buffer[] = [];
+    let release: () => void = () => undefined;
+    let stalled = true;
+    const slow = new Writable({
+      write(chunk: Buffer, _e, cb) {
+        taken.push(chunk);
+        if (stalled) release = cb;
+        else cb();
+      },
+    });
+    const copied = b.writeTo(slow);
+    const big = randomBytes(4 << 20);
+    let done = false;
+    a.write(big, () => (done = true));
+    await later(100);
+    // The destination took one chunk and has not written it, and holds more in its buffer:
+    // no credit came back for any of it, so the peer sent exactly one window.
+    expect(taken).toHaveLength(1);
+    expect(slow.writableLength).toBeGreaterThan(0);
+    expect(b.readableLength + slow.writableLength).toBe(DEFAULT_INITIAL_WINDOW);
+    expect(done).toBe(false);
+
+    stalled = false;
+    release();
+    a.end();
+    expect(await copied).toBe(big.length);
+    expect(Buffer.concat(taken).equals(big)).toBe(true);
+    expect(done).toBe(true);
+  });
+
+  it('writeTo() itself echoes, then end() completes the half-close', async () => {
+    const { a, b } = await pipePair();
+    const echo = b.writeTo(b).then((n) => (b.end(), n));
+    const input = randomBytes(1 << 20);
+    a.end(input);
+    const got = await drain(a);
+    expect(got.err).toBeUndefined();
+    expect(got.data.equals(input)).toBe(true);
+    expect(await echo).toBe(input.length);
+  });
+
+  it("writeTo() rejects with the peer's RESET, and refuses a socket with an encoding", async () => {
+    const { a, b } = await pipePair();
+    const copied = b.writeTo(new Writable({ write: (_c, _e, cb) => cb() }));
+    await write(a, 'x');
+    a.destroy(new PipeResetError(4600, 'gone'));
+    await expect(copied).rejects.toBeInstanceOf(PipeResetError);
+    const { b: c } = await pipePair();
+    c.setEncoding('utf8');
+    await expect(c.writeTo(new Writable())).rejects.toThrow(/encoding/);
+  });
+
+  it('writeTo() on itself rejects on a RESET while its echo is blocked and bytes are unread', async () => {
+    // b grants a 1 MiB, a grants b the default 256 KiB, so a can still send its RESET.
+    const { a, b } = await pipePair({ maxChannelWindow: -1, initialWindow: 1 << 20 });
+    const echo = b.writeTo(b);
+    // a never reads, so b's echo blocks on credit while b still holds unread bytes.
+    a.write(randomBytes(512 << 10));
+    await later(100);
+    expect(b.readableLength).toBeGreaterThan(0);
+    a.destroy(new PipeResetError(4600, 'gone'));
+    const r = await Promise.race([
+      echo.then(
+        () => 'resolved',
+        (e: unknown) => e,
+      ),
+      later(2000),
+    ]);
+    expect(r).toBeInstanceOf(PipeResetError);
+    await closedWithin(b.channel, 1000);
+    expect(b.destroyed).toBe(true);
+  });
+
+  it("writeTo() leaves no 'error' unhandled when a RESET ends the copy", async () => {
+    const ss = await sessions();
+    // No 'error' listeners on either end: the copy's rejection is the only report.
+    const [a, b] = await Promise.all([dialPipe(ss.client, { name: 'test' }), ss.listener.accept()]);
+    await later(10); // past the listener's hand-over guard
+    const echo = b.writeTo(b);
+    await write(a, 'x');
+    a.resetAndDestroy(4600, 'gone');
+    await expect(echo).rejects.toBeInstanceOf(PipeResetError);
+    await later(50);
+    expect(b.destroyed).toBe(true);
+  });
+
+  it('writeTo() rejects when the destination fails while the source is idle', async () => {
+    const { b } = await pipePair();
+    // emitClose false: the copy's listeners must go even without a 'close'.
+    const dest = new Writable({ emitClose: false, write: (_c, _e, cb) => cb() });
+    const copied = b.writeTo(dest);
+    await later(20);
+    dest.destroy(new Error('boom'));
+    await expect(copied).rejects.toThrow('boom');
+    await later(10);
+    expect(dest.listenerCount('error') + dest.listenerCount('close')).toBe(0);
   });
 
   it('never sends DATA larger than one frame, even for big writes', async () => {

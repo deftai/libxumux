@@ -1,0 +1,46 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run fmt:check
+      - run: npm test
+      - run: npm run build
+      # After the build: the stdio tests spawn a child that imports dist/. The interop test
+      # with libxumux-go skips itself without LIBXUMUX_GO_DIR.
+      - name: e2e
+        run: npx vitest run --config vitest.e2e.config.ts
+  # The behavioural conformance suite lives in the spec repository.
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: deftai/xumux
+          path: xumux
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - run: npm ci
+      - run: npm run test:conformance
+        env:
+          XUMUX_DIR: xumux

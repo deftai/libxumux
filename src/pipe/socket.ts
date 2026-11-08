@@ -3,7 +3,7 @@
  * @module pipe/socket
  */
 
-import { Duplex } from 'node:stream';
+import { Duplex, type Writable } from 'node:stream';
 import { CloseCode } from '../codec/constants.js';
 import type { ChannelMessage, XumuxChannel } from '../channel.js';
 import { PipeMessageType, PipeResetError, pipeTarget } from './profile.js';
@@ -26,6 +26,17 @@ export interface PipeSocketOptions {
   writableHighWaterMark?: number;
 }
 
+/** A pipe() in progress. `stop` wakes its copy, which then sees `stopped`. */
+interface Piped {
+  dest: Writable;
+  stopped: boolean;
+  /** pause() was called: read nothing until resume(). */
+  paused: boolean;
+  stop: () => void;
+  /** Wakes the copy to look again. */
+  wake: () => void;
+}
+
 /** How this side is ending the pipe, set just before `destroy()`. */
 type Ending = { reset: boolean; code: number; reason?: string };
 
@@ -43,9 +54,10 @@ type Ending = { reset: boolean; code: number; reason?: string };
  *   pipe/1 doesn't define closes the channel with 1002 and destroys it with an Error. Either
  *   way, bytes that arrived before are still delivered first.
  *
- * Credit goes back to the peer only as the consumer takes bytes out of the readable side
- * (`read()`, `'data'`, `pipe()`, async iteration), so a consumer that stops reading stops the
- * peer's writer once the window is full (pipe/1 backpressure). The readable buffer can
+ * Credit goes back to the peer only as bytes are consumed, so a consumer that stops stops
+ * the peer's writer once the window is full (pipe/1 backpressure). With `pipe()` (and so
+ * `stream.pipeline()`) or {@link writeTo}, a byte is consumed once the destination has
+ * written it; with `read()`, `'data'` or async iteration, once it leaves the readable side. The readable buffer can
  * therefore hold up to the channel's receive window, regardless of `readableHighWaterMark`.
  */
 export class PipeSocket extends Duplex {
@@ -55,6 +67,16 @@ export class PipeSocket extends Duplex {
   /** Bytes pushed to the readable side, and bytes of credit returned for them. */
   private pushed = 0;
   private returned = 0;
+  /** Bytes a copy (writeTo(), pipe()) has taken out but its destination has not yet written. */
+  private unwritten = 0;
+  /** A copy is reading: what read() returns is held until written. */
+  private holding = false;
+  /** Running copies (writeTo(), pipe()), told when the pipe fails. */
+  private readonly wakers = new Set<() => void>();
+  /** A copy is running: only one at a time reads the readable side. */
+  private copying = false;
+  /** The destination pipe() is copying to. */
+  private piped: Piped | null = null;
   private sentEOF = false;
   private gotEOF = false;
   /** The pipe has failed: destroy with this once the readable side has drained. */
@@ -134,8 +156,222 @@ export class PipeSocket extends Duplex {
   /** Every way of consuming the readable side goes through read(): credit follows it. */
   override read(size?: number): string | Buffer | null {
     const chunk = super.read(size) as string | Buffer | null;
+    if (this.holding && chunk !== null) this.unwritten += Buffer.byteLength(chunk);
     this.settle();
     return chunk;
+  }
+
+  /**
+   * Copy the readable side to `dest` until the peer's EOF, returning credit for each chunk
+   * only once `dest` has written it (its write callback), not as it is read. pipe/1 asks for
+   * this: credit follows writes to the local end, so a slow `dest` slows the peer exactly.
+   * It waits for `'drain'` when `dest` is full. {@link pipe} copies the same way; this is the
+   * promise-returning form.
+   *
+   * Resolves with the bytes written once they all have been; `dest` is not ended. Rejects
+   * if this socket fails (after the bytes that came before the failure have been passed to
+   * `dest`) or `dest` fails. Errors on either stream reject the copy rather than going
+   * unhandled while it runs. Meanwhile, consume the readable side no other way, and don't
+   * set an encoding.
+   *
+   * ```ts
+   * await socket.writeTo(socket); // an echo
+   * socket.end();
+   * ```
+   */
+  async writeTo(dest: Writable): Promise<number> {
+    if (this.readableEncoding !== null)
+      throw new Error('writeTo() needs a socket without an encoding');
+    if (this.readableFlowing) throw new Error('writeTo() needs a paused socket');
+    return this.copy(dest, false);
+  }
+
+  /**
+   * Like `Readable.pipe()`, but credit for each chunk goes back to the peer only once `dest`
+   * has written it (its write callback), not when the chunk reaches `dest`'s buffer, as
+   * pipe/1 requires. `stream.pipeline()` goes through this too. Ends `dest` after the peer's
+   * EOF unless `{ end: false }`, emits `'pipe'` and `'unpipe'` on `dest`, and returns it.
+   * Errors are not caught: as with `Readable.pipe()`, an `'error'` on either stream with no
+   * listener of its own is thrown. A socket is piped to one destination at a time.
+   *
+   * With an encoding set (`setEncoding()`), this falls back to `Readable.pipe()`, whose
+   * credit goes back as chunks are read.
+   */
+  override pipe<T extends NodeJS.WritableStream>(dest: T, options?: { end?: boolean }): T {
+    if (this.readableEncoding !== null) return super.pipe(dest, options);
+    if (this.copying) throw new Error('a PipeSocket is piped to one destination at a time');
+    const w = dest as unknown as Writable;
+    if (this.readableFlowing) this.pause();
+    const piped: Piped = { dest: w, stopped: false, paused: false, stop: noop, wake: noop };
+    this.piped = piped;
+    const doEnd = options?.end !== false && w !== process.stdout && w !== process.stderr;
+    // However the copy stops (EOF, a failure, the destination finishing or closing), the
+    // destination hears 'unpipe' once, as from Readable.pipe(); unpipe() already sent it.
+    const detach = (end: boolean): void => {
+      if (this.piped === piped) this.piped = null;
+      if (piped.stopped) return;
+      piped.stopped = true;
+      if (end) w.end();
+      w.emit('unpipe', this);
+    };
+    w.emit('pipe', this);
+    this.copy(w, true, piped).then(
+      () => detach(doEnd),
+      // Errors reach the streams' own 'error' listeners; a failed copy just stops.
+      () => detach(false),
+    );
+    return dest;
+  }
+
+  /** While piping, holds the copy until {@link resume}, as for `Readable.pipe()`. */
+  override pause(): this {
+    if (this.piped) this.piped.paused = true;
+    return super.pause();
+  }
+
+  /** Lets a paused pipe go on. */
+  override resume(): this {
+    const piped = this.piped;
+    if (piped?.paused) {
+      piped.paused = false;
+      piped.wake();
+    }
+    return super.resume();
+  }
+
+  /** Stop piping into `dest` (or any destination). Unread bytes stay unread, without credit. */
+  override unpipe(dest?: NodeJS.WritableStream): this {
+    const piped = this.piped;
+    if (!piped || (dest !== undefined && (dest as unknown) !== piped.dest))
+      return super.unpipe(dest);
+    this.piped = null;
+    piped.stopped = true;
+    piped.stop();
+    this.pause();
+    piped.dest.emit('unpipe', this);
+    return this;
+  }
+
+  /**
+   * The copy behind {@link writeTo} and {@link pipe}. `asPipe`: errors keep Readable.pipe()'s
+   * behaviour (not caught; a destination 'error' with no other listener is thrown), and a
+   * destination that closes or finishes just stops the copy.
+   */
+  private async copy(dest: Writable, asPipe: boolean, piped?: Piped): Promise<number> {
+    if (this.copying) throw new Error('a PipeSocket is copied to one destination at a time');
+    this.copying = true;
+    let total = 0;
+    let pending = 0;
+    // In an object: TypeScript doesn't see the callbacks' assignments to a plain variable.
+    const failed: { dest: Error | null } = { dest: null };
+    let wake: (() => void) | null = null;
+    const poke = (): void => {
+      const w = wake;
+      wake = null;
+      w?.();
+    };
+    const sleep = (): Promise<void> => new Promise((r) => (wake = r));
+    // Streams that have emitted 'error' or 'close' (`errored` and `closed` are set before).
+    const settled = new Set<Writable>();
+    const onDestError = (e: Error): void => {
+      settled.add(dest);
+      failed.dest ??= e;
+      poke();
+      if (asPipe) {
+        // As Readable.pipe() does: an error nobody else listens for is thrown.
+        dest.off('error', onDestError);
+        if (dest.listenerCount('error') === 0) dest.emit('error', e);
+      }
+    };
+    const onSourceEvent = (): void => void settled.add(this);
+    const onDestClose = (): void => {
+      settled.add(dest);
+      // A destination that closes before the copy is done fails it (unless it is this
+      // socket, whose own state says why). For pipe(), it just ends the copy.
+      if (dest !== this) failed.dest ??= dest.errored ?? new Error('destination closed');
+      poke();
+    };
+    // For pipe() the source's 'error' is left to its own listeners; 'close' follows it.
+    const sourceEvents = asPipe
+      ? (['readable', 'end', 'close'] as const)
+      : (['readable', 'end', 'close', 'error'] as const);
+    for (const e of sourceEvents) this.on(e, poke);
+    if (!asPipe) this.on('error', onSourceEvent);
+    this.on('close', onSourceEvent);
+    this.wakers.add(poke);
+    dest.on('drain', poke);
+    if (asPipe) {
+      dest.prependListener('error', onDestError);
+      dest.on('finish', onDestClose);
+    } else dest.on('error', onDestError);
+    dest.on('close', onDestClose);
+    let cleaned = false;
+    const cleanup = (): void => {
+      if (cleaned) return;
+      cleaned = true;
+      this.copying = false;
+      for (const e of sourceEvents) this.off(e, poke);
+      this.off('close', onSourceEvent);
+      this.wakers.delete(poke);
+      dest.off('drain', poke);
+      dest.off('close', onDestClose);
+      if (asPipe) {
+        dest.off('finish', onDestClose);
+        dest.off('error', onDestError);
+      } else {
+        // A failed stream emits 'error' after the copy has seen the failure: keep the
+        // copy's handlers until then, since the rejection has already reported the error.
+        offErrorLater(this, [poke, onSourceEvent], settled.has(this));
+        offErrorLater(dest, [onDestError], settled.has(dest));
+      }
+    };
+    if (piped) piped.wake = poke;
+    if (piped)
+      piped.stop = () => {
+        // Synchronously, so a resume() right after unpipe() is not held back by 'readable'.
+        cleanup();
+        poke();
+      };
+    try {
+      for (;;) {
+        if (piped?.stopped) return total;
+        if (this.errored) throw this.errored;
+        if (failed.dest) throw failed.dest;
+        if (this.readableEnded) {
+          if (pending === 0) return total;
+        } else if (this.destroyed) {
+          throw new Error('pipe destroyed');
+        } else if ((!dest.writableNeedDrain && !piped?.paused) || this.failure) {
+          // After a failure, keep passing on the bytes that came before it, without
+          // waiting for a write the failure holds (this socket as its own destination).
+          this.holding = true;
+          let chunk: Buffer | null;
+          try {
+            chunk = this.read() as Buffer | null;
+          } finally {
+            this.holding = false;
+          }
+          if (chunk !== null) {
+            const n = chunk.length;
+            pending++;
+            dest.write(chunk, (e) => {
+              pending--;
+              if (e) failed.dest ??= e;
+              else {
+                this.unwritten -= n;
+                total += n;
+                this.settle();
+              }
+              poke();
+            });
+            continue;
+          }
+        }
+        await sleep();
+      }
+    } finally {
+      cleanup();
+    }
   }
 
   override _read(): void {
@@ -202,7 +438,7 @@ export class PipeSocket extends Duplex {
   private settle(): void {
     // With setEncoding, readableLength counts characters, not bytes, so this can run ahead of
     // the consumer by up to the buffered bytes. It never returns more than was received.
-    const consumed = this.pushed - this.readableLength;
+    const consumed = this.pushed - this.readableLength - this.unwritten;
     if (consumed > this.returned) {
       this.channel.returnCredit(consumed - this.returned);
       this.returned = consumed;
@@ -220,6 +456,7 @@ export class PipeSocket extends Duplex {
     this.writeAbort.abort(err);
     if (code !== null) void this.channel.close(code, reason).catch(noop);
     this.settle();
+    for (const w of this.wakers) w();
   }
 
   // ─── Writable side ──────────────────────────────────────────────────────────
@@ -318,6 +555,23 @@ export class PipeSocket extends Duplex {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
   }
+}
+
+/**
+ * Remove 'error' listeners now or, if `s` has failed but not yet emitted 'error' or 'close',
+ * once it emits either: a failed stream emits 'error' a tick after it is marked errored.
+ */
+function offErrorLater(s: Writable, fns: Array<(err: Error) => void>, settled: boolean): void {
+  const off = (): void => {
+    for (const fn of fns) s.off('error', fn);
+    s.off('error', off);
+    s.off('close', off);
+  };
+  if (s.errored && !settled) {
+    // Listeners run from a copy of the list, so the copy's own still see this 'error'.
+    s.on('error', off);
+    s.on('close', off);
+  } else off();
 }
 
 /** How destroy(err) ends the pipe: RESET for an error, else EOF and 1000. */
