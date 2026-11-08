@@ -2,7 +2,7 @@
 
 TypeScript reference implementation of [xumux](https://github.com/deftai/xumux) **0.3**: named, typed channels with per-channel flow control and probes, over any transport.
 
-> **Status**: implements the xumux 0.3.0-draft core ([spec/core.md](https://github.com/deftai/xumux/blob/v0.3.0-draft/spec/core.md)) and passes its [conformance vectors](tests/fixtures/xumux-vectors.json), plus the [pipe/1 profile](#pipes-pipe1). Not yet implemented: the `webrtc-multichannel/1` and `session-resume/1` extensions, and multi-stream QUIC. 0.2 and 0.3 peers refuse each other with `4006`.
+> **Status**: implements the xumux 0.3.0-draft core ([spec/core.md](https://github.com/deftai/xumux/blob/v0.3.0-draft/spec/core.md)) and passes its [conformance vectors](tests/fixtures/xumux-vectors.json), plus the [pipe/1 profile](#pipes-pipe1). Not yet implemented: the `webrtc-multichannel/1` and `session-resume/1` extensions, and multi-stream QUIC. A server refuses a HELLO from a 0.2 client with `4006`, and a 0.2 server refuses this library's HELLO the same way.
 
 ## Install
 
@@ -205,7 +205,7 @@ await server.accept({
 
 ## Migrating from 0.2
 
-xumux 0.3 changes no frame layouts, but the version is `[0, 3, 0]` and 0.x minors are incompatible, so a 0.3 peer and a 0.2 peer refuse each other with `4006` ([spec §3.5](https://github.com/deftai/xumux/blob/v0.3.0-draft/spec/core.md#35-version-negotiation)). Upgrade both ends together. The API is backwards compatible; `ConnectResult` and `AcceptResult` gain `extensions` and `extensionParams`.
+xumux 0.3 changes no frame layouts, but the version is `[0, 3, 0]` and 0.x minors are incompatible, so a server of either version refuses a HELLO of the other with CLOSE `4006` ([spec §3.5](https://github.com/deftai/xumux/blob/v0.3.0-draft/spec/core.md#35-version-negotiation)). A client that nonetheless receives a WELCOME of another version closes with `1002`. Upgrade both ends together. The API is backwards compatible; `ConnectResult` and `AcceptResult` gain `extensions` and `extensionParams`.
 
 ## Migrating from 0.1
 

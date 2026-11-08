@@ -135,6 +135,48 @@ describe('extensionParams (core §3.8)', () => {
     await client.close();
   });
 
+  it('passes undefined, not an inherited value, for a missing __proto__ entry', async () => {
+    const [ct, st] = createInMemoryPair();
+    const client = new XumuxClient(ct, base);
+    const server = new XumuxServer(st, base);
+    const got: unknown[] = [];
+    await Promise.all([
+      client.connect({
+        extensions: ['__proto__'],
+        checkExtensionParams: (_e, p) => (got.push(p), true),
+      }),
+      server.accept({
+        extensions: ['__proto__'],
+        negotiateExtension: (_e, p) => (got.push(p), true),
+      }),
+    ]);
+    expect(got).toEqual([undefined, undefined]);
+    await client.close();
+  });
+
+  it('client checks a duplicated WELCOME extension once', async () => {
+    const { transport, raw } = rawPair();
+    const client = new XumuxClient(transport, base);
+    let calls = 0;
+    const p = client.connect({ extensions: ['a/1'], checkExtensionParams: () => (calls++, true) });
+    await raw.awaitHelloSendWelcome({ extensions: ['a/1', 'a/1'] });
+    expect((await p).extensions).toEqual(['a/1']);
+    expect(calls).toBe(1);
+    await client.close();
+  });
+
+  it('server refuses when its WELCOME params cannot be encoded', async () => {
+    const { transport, raw } = rawPair();
+    const server = new XumuxServer(transport, base);
+    const p = server
+      .accept({ extensions: ['a/1'], negotiateExtension: () => ({ params: 1n }) })
+      .catch((e: unknown) => e);
+    raw.send(ctrl(ControlType.HELLO, { version: [0, 3, 0], extensions: ['a/1'] }));
+    expect(json(await raw.control(ControlType.CLOSE)).code).toBe(CloseCode.GOING_AWAY);
+    expect(await p).toBeInstanceOf(XumuxClosedError);
+    expect((await server.closed).code).toBe(CloseCode.GOING_AWAY);
+  });
+
   it('server closes 4001 when HELLO extensionParams is not an object', async () => {
     const { transport, raw } = rawPair();
     const server = new XumuxServer(transport, base);

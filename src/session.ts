@@ -361,6 +361,10 @@ function pickParams(
   return out;
 }
 
+/** One entry, or undefined: never a value inherited from Object.prototype. */
+const getParam = (params: ExtensionParams, name: string): unknown =>
+  Object.hasOwn(params, name) ? params[name] : undefined;
+
 /** Set one entry as an own property, even for a name such as `__proto__`. */
 function setParam(params: ExtensionParams, name: string, value: unknown): void {
   Object.defineProperty(params, name, {
@@ -1701,7 +1705,7 @@ export class XumuxClient extends XumuxPeer {
     const waiting = this.awaitHandshake();
     void this.sendControl(frame).catch(ignore);
     const welcome = (await waiting) as WelcomeMessage;
-    const extensions = welcome.extensions ?? [];
+    const extensions = [...new Set(welcome.extensions ?? [])];
     let welcomeParams: ExtensionParams = {};
 
     try {
@@ -1716,7 +1720,7 @@ export class XumuxClient extends XumuxPeer {
       for (const ext of extensions) {
         let ok: boolean;
         try {
-          ok = opts.checkExtensionParams?.(ext, welcomeParams[ext]) ?? true;
+          ok = opts.checkExtensionParams?.(ext, getParam(welcomeParams, ext)) ?? true;
         } catch {
           ok = false;
         }
@@ -1849,7 +1853,7 @@ export class XumuxServer extends XumuxPeer {
       let d: ExtensionDecision;
       try {
         d = opts.negotiateExtension
-          ? await opts.negotiateExtension(ext, offered[ext], hello)
+          ? await opts.negotiateExtension(ext, getParam(offered, ext), hello)
           : true;
       } catch {
         d = false;
@@ -1897,7 +1901,16 @@ export class XumuxServer extends XumuxPeer {
       ...(accepted.length && { channels: accepted }),
       ...(rejected.length && { rejected }),
     };
-    const frame = welcomeFrame(welcome);
+    let frame: Frame;
+    try {
+      frame = welcomeFrame(welcome);
+    } catch (e) {
+      // For example negotiateExtension returned params that JSON cannot encode.
+      return refuse(
+        CloseCode.GOING_AWAY,
+        `cannot encode WELCOME: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
     // The server's extensionParams count toward the 65536-byte WELCOME limit (core §3.8).
     if (frame.payload.length > CONTROL_MAX_PAYLOAD)
       refuse(
