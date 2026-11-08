@@ -10,6 +10,7 @@ import type { ChannelRequest } from '../control/messages.js';
 import type { ChannelDecision, ChannelPolicy, XumuxPeer } from '../session.js';
 import { checkPipeRequest, PIPE_PROFILE } from './profile.js';
 import { PipeSocket, type PipeSocketOptions } from './socket.js';
+import { ignore } from '../ignore.js';
 
 export interface PipeListenerOptions {
   /**
@@ -98,7 +99,7 @@ export class PipeListener extends EventEmitter<PipeListenerEvents> {
       const ch = (e as CustomEvent<XumuxChannel>).detail;
       if (ch.metadata?.profile !== PIPE_PROFILE) return;
       if (this.closed) {
-        void ch.close(CloseCode.GOING_AWAY, 'listener closed').catch(() => undefined);
+        void ch.close(CloseCode.GOING_AWAY, 'listener closed').catch(ignore);
         return;
       }
       this.deliver(new PipeSocket(ch, this.options.socket));
@@ -162,8 +163,6 @@ export class PipeListener extends EventEmitter<PipeListenerEvents> {
     return s;
   }
 }
-
-const ignore = (): void => undefined;
 
 function listenerClosed(): Error {
   return Object.assign(new Error('pipe listener closed'), { code: 'ERR_SERVER_NOT_RUNNING' });

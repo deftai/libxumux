@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Development tooling: vitest 5 and `@vitest/coverage-v8` 5 (were 3), tsup 9 (was 8), and in-range updates of the rest, which clears every `npm audit` advisory (all were in dev dependencies; the package itself has none). An npm override moves typescript-eslint's `minimatch` to 11.0.5. Building and testing now need Node 22.12 or later; the published package still supports Node 20. No library changes, apart from sharing one `ignore` rejection handler, which the newer coverage tool counts once instead of once per call site.
+
 ## [0.4.0] - 2026-11-08
 
 ### Added
