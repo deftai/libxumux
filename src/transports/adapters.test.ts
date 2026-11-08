@@ -285,11 +285,11 @@ describe('review regressions (adapters)', () => {
       if (kind === 'websocket') new WebSocketAdapter(like as unknown as WebSocketLike);
       else new WebRTCAdapter(like as unknown as DataChannelLike);
       target.dispatchEvent(new Event('close'));
-      expect(like.removeEventListener.mock.calls.map((c) => c[0]).sort()).toEqual([
-        'close',
-        'error',
-        'message',
-      ]);
+      expect(like.removeEventListener.mock.calls.map((c) => c[0]).sort()).toEqual(
+        kind === 'websocket'
+          ? ['close', 'error', 'message']
+          : ['bufferedamountlow', 'close', 'error', 'message', 'open'],
+      );
     },
   );
 });

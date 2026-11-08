@@ -91,6 +91,11 @@ tasks:
     cmds:
       - npx vitest run --config vitest.e2e.config.ts tests/e2e/webrtc-native.e2e.test.ts
 
+  e2e:webrtc:polyfill:
+    desc: Run WebRTC E2E tests over the standard RTCPeerConnection API (node-datachannel/polyfill)
+    cmds:
+      - npx vitest run --config vitest.e2e.config.ts tests/e2e/webrtc-polyfill.e2e.test.ts
+
   clean:
     desc: Remove build artifacts and coverage output
     cmds:

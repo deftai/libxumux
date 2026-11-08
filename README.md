@@ -163,7 +163,22 @@ import { StdioAdapter } from 'libxumux/transports/stdio';
 import { createInMemoryPair } from 'libxumux';
 ```
 
-WebRTC: create the DataChannel with `pc.createDataChannel('xumux', XUMUX_DATACHANNEL_INIT)` on both peers. That sets `negotiated: true, id: 0`.
+WebRTC ([binding](https://github.com/deftai/xumux/blob/main/spec/bindings/webrtc.md)): the whole connection runs over one reliable, ordered DataChannel. Signalling is the application's. Create the DataChannel on both peers before the offer, then wrap it in an adapter:
+
+```ts
+import { WebRTCAdapter, createXumuxDataChannel } from 'libxumux/transports/webrtc';
+
+const dc = createXumuxDataChannel(pc); // label/protocol "xumux", negotiated: true, id: 0, ordered
+const client = new XumuxClient(new WebRTCAdapter(dc));
+// ... exchange offer/answer and ICE candidates ...
+await client.connect(); // HELLO waits for the DataChannel to open
+```
+
+- `WebRTCAdapter` takes any standard `RTCDataChannel`: from a browser, or from `node-datachannel/polyfill` in Node. It checks the label, protocol and reliability. A DataChannel that is still connecting is fine, and `adapter.opened` resolves once it opens.
+- Backpressure: once `bufferedAmount` is above `highWaterMark` (default 1 MiB), sends wait for `bufferedamountlow` at half of it.
+- `client.close()` runs the xumux CLOSE exchange and then closes the DataChannel. The PeerConnection is yours to close, since it may also carry media tracks. If the DataChannel closes unexpectedly, the session ends with `1001`.
+- Frames must fit in one SCTP message. The default 16 KiB fragments always do. If you raise `fragmentSize`, cap it with `fragmentSizeFor(pc.sctp?.maxMessageSize, size)`.
+- If the DataChannel hasn't opened about 10 s after the offer, the binding recommends falling back to WebSocket.
 
 A custom transport implements `TransportAdapter`: `kind: 'message' | 'stream'`, `send(bytes): void | Promise<void>` (return a promise to apply backpressure), `receive(): AsyncIterable<Uint8Array>` and `close()`.
 

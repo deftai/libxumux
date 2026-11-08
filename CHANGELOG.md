@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `XumuxChannel.sendPrefix(type, payload, signal?)`: sends as much of `payload` as fits in one unfragmented frame and the free send credit, and resolves with the number of bytes sent. An abort while it waits for credit sends nothing.
 - `XumuxChannel.setManualCredit()` and `returnCredit()`: with manual credit, `receive()` no longer returns a message's credit; the application returns it once it has used the bytes.
 - `conformance/adapter.mjs` runs libxumux as the server under test for the xumux behavioural conformance suite (deftai/xumux `conformance/behaviour`): `XUMUX_DIR=path/to/xumux npm run test:conformance`. All 48 core scenarios pass; the pipe/1 ones are skipped until pipe/1 support lands.
+- WebRTC binding: `createXumuxDataChannel(pc)` creates the negotiated `xumux` DataChannel, `checkXumuxDataChannel` checks a DataChannel against the binding (label and protocol `xumux`, ordered, reliable), and `fragmentSizeFor(pc.sctp?.maxMessageSize)` keeps outgoing frames within the peer's SCTP maximum message size.
+- `WebRTCAdapter.opened` resolves when the DataChannel opens and rejects if it closes first.
+
+### Changed
+
+- `WebRTCAdapter` is typed against the standard `RTCDataChannel`, so a browser DataChannel (or the `node-datachannel/polyfill` one) can be passed straight in. A compile-time check keeps the two compatible.
+- `WebRTCAdapter` accepts a DataChannel that is still connecting. Sends wait for it to open instead of throwing.
+- Send backpressure now waits for the `bufferedamountlow` event, with the threshold at half of `highWaterMark`, instead of polling every 5 ms. It still polls for DataChannel wrappers that have no `bufferedAmountLowThreshold`.
+- `WebRTCAdapter` throws a `TypeError` for a DataChannel that breaks the binding: the wrong label or protocol, unordered, or with `maxRetransmits` or `maxPacketLifeTime`.
+- Blob messages, from a DataChannel whose `binaryType` cannot be changed, are accepted and kept in order.
 
 ## [0.3.1] - 2026-11-08
 
