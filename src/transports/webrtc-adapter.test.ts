@@ -199,6 +199,23 @@ describe('WebRTCAdapter', () => {
     expect(await got).toEqual([[1], [2, 2], [3], [4]]);
   });
 
+  it('ends input with an error if a Blob cannot be read, delivering nothing after it', async () => {
+    const f = fake();
+    const a = new WebRTCAdapter(asDc(f));
+    const got: number[][] = [];
+    const done = (async () => {
+      for await (const x of a.receive()) got.push([...x]);
+    })();
+    const bad = new Blob([new Uint8Array([2])]);
+    bad.arrayBuffer = () => Promise.reject(new Error('read failed'));
+    f.message(new Uint8Array([1]).buffer);
+    f.message(bad);
+    f.message(new Uint8Array([3]).buffer);
+    f.message(new Blob([new Uint8Array([4])]));
+    await expect(done).rejects.toThrow('could not be read');
+    expect(got).toEqual([[1]]);
+  });
+
   it('treats a text message as a protocol error', async () => {
     const f = fake();
     const a = new WebRTCAdapter(asDc(f));

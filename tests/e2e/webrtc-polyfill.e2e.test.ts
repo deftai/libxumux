@@ -38,11 +38,13 @@ async function signal(a: PC, b: PC): Promise<void> {
 interface Pair {
   client: { pc: PC; dc: RTCDataChannel; adapter: WebRTCAdapter };
   server: { pc: PC; dc: RTCDataChannel; adapter: WebRTCAdapter };
+  /** Exchange offer, answer and candidates. */
+  signal(): Promise<void>;
   close(): void;
 }
 
-/** Two peers with the negotiated xumux DataChannel, adapters created before signalling. */
-async function pair(highWaterMark?: number): Promise<Pair> {
+/** Two peers with the negotiated xumux DataChannel and adapters, not yet signalled. */
+function pair(highWaterMark?: number): Pair {
   const pcs = [new RTCPeerConnection(), new RTCPeerConnection()] as const;
   const side = (pc: PC) => {
     const dc = createXumuxDataChannel(pc) as RTCDataChannel;
@@ -51,9 +53,9 @@ async function pair(highWaterMark?: number): Promise<Pair> {
   const p = {
     client: side(pcs[0]),
     server: side(pcs[1]),
+    signal: () => signal(pcs[0], pcs[1]),
     close: () => pcs.forEach((x) => x.close()),
   };
-  await signal(pcs[0], pcs[1]);
   return p;
 }
 
@@ -64,7 +66,7 @@ const closed = (dc: RTCDataChannel): Promise<void> =>
 
 describe('WebRTC binding over the standard RTCDataChannel API (node-datachannel polyfill)', () => {
   it('handshake, channels, probes and a normal close that closes the DataChannel', async () => {
-    const p = await pair();
+    const p = pair();
     try {
       const client = new XumuxClient(p.client.adapter, { pingInterval: 0 });
       const server = new XumuxServer(p.server.adapter, {
@@ -78,14 +80,19 @@ describe('WebRTC binding over the standard RTCDataChannel API (node-datachannel 
         })();
       server.addEventListener('channel', (e) => echo((e as CustomEvent<XumuxChannel>).detail));
 
-      // connect() runs while the DataChannel may still be connecting: HELLO waits for open.
-      const [c, s] = await Promise.all([
+      // Start the handshake before signalling: HELLO must wait for the DataChannel to open.
+      expect(p.client.dc.readyState).toBe('connecting');
+      const handshake = Promise.all([
         client.connect({
           application: 'webrtc-e2e/1',
           channels: [{ name: 'hello', reliable: true, ordered: true }],
         }),
         server.accept(),
       ]);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(p.client.dc.readyState).toBe('connecting');
+      await p.signal();
+      const [c, s] = await handshake;
       expect(s.hello.application).toBe('webrtc-e2e/1');
       expect(c.channels[0]!.properties).toMatchObject({ reliable: true, ordered: true });
       echo(s.channels[0]!);
@@ -112,8 +119,9 @@ describe('WebRTC binding over the standard RTCDataChannel API (node-datachannel 
 
   it('a bulk transfer is held back by the DataChannel send buffer, and arrives intact', async () => {
     const high = 64 << 10;
-    const p = await pair(high);
+    const p = pair(high);
     try {
+      await p.signal();
       // Record the send buffer after every send.
       let peak = 0;
       const dc = p.client.dc;
@@ -171,8 +179,9 @@ describe('WebRTC binding over the standard RTCDataChannel API (node-datachannel 
   }, 60_000);
 
   it('the session ends as lost if the DataChannel closes without a CLOSE exchange', async () => {
-    const p = await pair();
+    const p = pair();
     try {
+      await p.signal();
       const client = new XumuxClient(p.client.adapter, { pingInterval: 0 });
       const server = new XumuxServer(p.server.adapter, { pingInterval: 0 });
       await Promise.all([client.connect(), server.accept()]);

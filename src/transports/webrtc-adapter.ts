@@ -190,7 +190,18 @@ export class WebRTCAdapter implements TransportAdapter {
       else if (ArrayBuffer.isView(d))
         deliver(() => this.queue.push(new Uint8Array(d.buffer, d.byteOffset, d.byteLength)));
       else if (typeof Blob !== 'undefined' && d instanceof Blob)
-        deliver(async () => this.queue.push(new Uint8Array(await d.arrayBuffer())));
+        deliver(async () => {
+          let b: ArrayBuffer;
+          try {
+            b = await d.arrayBuffer();
+          } catch (e) {
+            // A message is lost: end input here, so nothing after it is delivered.
+            this.queue.end(new Error(`DataChannel Blob message could not be read: ${String(e)}`));
+            end();
+            return;
+          }
+          this.queue.push(new Uint8Array(b));
+        });
       else end(new XumuxProtocolError(CloseCode.PROTOCOL_ERROR, 'non-binary DataChannel message'));
     };
     const onOpen = (): void => opened();
