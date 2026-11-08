@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-08
+
 ### Security
 
 - `maxChannels` (default 1024) limits the channels open or being opened on a connection. Past it, the peer's OPEN_CHANNEL or HELLO channels are refused with `4002`. Before, a peer could open channels until the IDs ran out, about 32,000, each with its own receive window.
@@ -95,6 +97,7 @@ Implements the xumux 0.2.0-draft core specification (deftai/xumux `spec/core.md`
 - `HEADER_SIZE` constant (8)
 - Initial project scaffold (package.json, tsconfig.json, tsup, Vitest, ESLint, Prettier, Taskfile)
 
-[Unreleased]: https://github.com/deftai/libxumux/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/deftai/libxumux/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/deftai/libxumux/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/deftai/libxumux/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/deftai/libxumux/releases/tag/v0.2.0
