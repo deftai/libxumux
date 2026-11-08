@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- `maxChannels` (default 1024) limits the channels open or being opened on a connection. Past it, the peer's OPEN_CHANNEL or HELLO channels are refused with `4002`. Before, a peer could open channels until the IDs ran out, about 32,000, each with its own receive window.
+- `maxControlQueue` (default 1 MiB) limits the queue of control and probe frames waiting to be sent. A peer that keeps sending frames that need replies but never reads them is disconnected with `4004`, instead of growing the queue without limit. A negative value turns the cap off.
+- `DEFAULT_MAX_CHANNELS` and `DEFAULT_MAX_CONTROL_QUEUE` are exported.
+
 ## [0.3.0] - 2026-11-07
 
 ### Added

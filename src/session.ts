@@ -19,6 +19,8 @@ import {
   DEFAULT_INITIAL_WINDOW,
   DEFAULT_MAX_CHANNEL_WINDOW,
   DEFAULT_CONNECTION_WINDOW,
+  DEFAULT_MAX_CONTROL_QUEUE,
+  DEFAULT_MAX_CHANNELS,
   DEFAULT_MAX_FRAME_PAYLOAD,
   DEFAULT_MAX_MESSAGE_SIZE,
   DEFAULT_PING_INTERVAL,
@@ -120,6 +122,19 @@ export interface XumuxOptions {
    * application hasn't read yet stays buffered.
    */
   connectionWindow?: number;
+  /**
+   * Cap, in bytes, on control and probe frames (CHANNEL_ACK, WINDOW_UPDATE, PONG, ERROR, ...)
+   * queued for sending. Default 1 MiB. They pile up only if the peer stops reading while it keeps
+   * sending frames that need a reply; past the cap the connection closes with 4004. Data frames
+   * are bounded by flow control instead. Negative: no cap.
+   */
+  maxControlQueue?: number;
+  /**
+   * Cap on channels open or being opened on the connection, default 1024. Past it, the peer's
+   * OPEN_CHANNEL (or HELLO channel) is refused with 4002. Each channel holds a receive window
+   * (initialWindow), so this bounds what a peer can make this side buffer. Must be positive.
+   */
+  maxChannels?: number;
 }
 
 export interface ConnectOptions {
@@ -234,6 +249,12 @@ function checkWindowOptions(o: XumuxOptions): string | null {
     return `maxChannelWindow must be an integer, got ${String(m)}`;
   if (c !== undefined && (!Number.isSafeInteger(c) || c < 0))
     return `connectionWindow must be a non-negative integer, got ${String(c)}`;
+  const q = o.maxControlQueue;
+  if (q !== undefined && !Number.isSafeInteger(q))
+    return `maxControlQueue must be an integer, got ${String(q)}`;
+  const mc = o.maxChannels;
+  if (mc !== undefined && (!Number.isSafeInteger(mc) || mc < 1))
+    return `maxChannels must be a positive integer, got ${String(mc)}`;
   return null;
 }
 
@@ -283,6 +304,8 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   /** Sum of channel receive windows (the auto-tuning budget). */
   private windowTotal = 0;
+  /** Bytes queued in `urgent`, for maxControlQueue. */
+  private urgentBytes = 0;
   private rttProbing = false;
   /** When auto-tuning last sent a probe (performance.now() ms). */
   private rttProbedAt = -Infinity;
@@ -963,6 +986,16 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
       throw protocolError(`OPEN_CHANNEL with invalid ID ${req.id}`);
     if (this.slots.has(req.id) || this.pendingRemote.has(req.id))
       throw protocolError(`OPEN_CHANNEL for ID ${req.id}, which is in use`);
+    if (this.slots.size + this.pendingRemote.size >= this.maxChannels()) {
+      void this.enqueueUrgent(
+        channelRejectFrame({
+          id: req.id,
+          code: CloseCode.CHANNEL_LIMIT,
+          reason: 'too many channels',
+        }),
+      ).catch(() => undefined);
+      return;
+    }
     this.pendingRemote.add(req.id);
     void this.decide(req).then((d) => {
       this.pendingRemote.delete(req.id);
@@ -1172,6 +1205,15 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
 
   // ─── Outbound scheduler ─────────────────────────────────────────────────────
 
+  protected maxChannels(): number {
+    return this.options.maxChannels ?? DEFAULT_MAX_CHANNELS;
+  }
+
+  private controlQueueLimit(): number {
+    const q = this.options.maxControlQueue ?? 0;
+    return q < 0 ? Infinity : q === 0 ? DEFAULT_MAX_CONTROL_QUEUE : q;
+  }
+
   private enqueueUrgent(frame: Frame): Promise<void> {
     return this.enqueue(frame, null);
   }
@@ -1186,6 +1228,19 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     return new Promise<void>((resolve, reject) => {
       const out: Out = { bytes: encodeFrame(frame), resolve, reject };
       if (channel === null) {
+        const limit = this.controlQueueLimit();
+        if (this.state === 'open' && this.urgentBytes + out.bytes.length > limit) {
+          // The peer keeps sending frames that need a reply but doesn't read the replies. Close
+          // rather than queue without bound. (Pausing reads instead could deadlock two such peers.)
+          this.beginClose(
+            CloseCode.RATE_LIMITED,
+            `peer is not reading: over ${limit} bytes of control frames queued`,
+            false,
+          );
+          reject(new Error('connection is closing'));
+          return;
+        }
+        this.urgentBytes += out.bytes.length;
         this.urgent.push(out);
       } else {
         let q = this.dataQueues.get(channel);
@@ -1199,7 +1254,10 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
 
   private next(): Out | undefined {
     const u = this.urgent.shift();
-    if (u) return u;
+    if (u) {
+      this.urgentBytes -= u.bytes.length;
+      return u;
+    }
     const id = this.rr.shift();
     if (id === undefined) return undefined;
     const q = this.dataQueues.get(id)!;
@@ -1249,6 +1307,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
 
   private rejectQueued(e: unknown): void {
     for (const o of this.urgent.splice(0)) o.reject(e);
+    this.urgentBytes = 0;
     for (const q of this.dataQueues.values()) for (const o of q.splice(0)) o.reject(e);
     this.dataQueues.clear();
     this.rr.length = 0;
@@ -1523,6 +1582,10 @@ export class XumuxServer extends XumuxPeer {
     const rejected: ChannelRefusal[] = [];
     const openReqs: ChannelRequest[] = [];
     for (const req of hello.channels ?? []) {
+      if (accepted.length >= this.maxChannels()) {
+        rejected.push({ id: req.id, code: CloseCode.CHANNEL_LIMIT, reason: 'too many channels' });
+        continue;
+      }
       const d = await this.decide(req);
       if (d === true) {
         accepted.push(this.effective(req));

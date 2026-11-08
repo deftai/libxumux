@@ -81,6 +81,10 @@ export const DEFAULT_INITIAL_WINDOW = 262144;
 /** Receive-window auto-tuning bounds: per channel, and the sum over a connection. */
 export const DEFAULT_MAX_CHANNEL_WINDOW = 16 * 1024 * 1024;
 export const DEFAULT_CONNECTION_WINDOW = 64 * 1024 * 1024;
+/** Bound on queued control and probe frames, in bytes (see `maxControlQueue`). */
+export const DEFAULT_MAX_CONTROL_QUEUE = 1024 * 1024;
+/** Cap on open plus pending channels the peer may hold (see `maxChannels`). */
+export const DEFAULT_MAX_CHANNELS = 1024;
 
 /** Lower / upper bounds for declared limits. */
 export const MIN_MAX_FRAME_PAYLOAD = 4096;
