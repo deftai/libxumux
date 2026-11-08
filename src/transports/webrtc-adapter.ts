@@ -100,17 +100,22 @@ export function checkXumuxDataChannel(dc: DataChannelLike): void {
 /**
  * The `fragmentSize` session option for a peer whose SCTP maximum message size
  * is `maxMessageSize` (`pc.sctp?.maxMessageSize`): `preferred`, reduced so that
- * a frame (8-byte header plus payload) fits in one message.
+ * a frame (8-byte header plus payload) fits in one message. Throws a
+ * `RangeError` if `preferred` is not a positive integer, or no frame can fit.
  */
 export function fragmentSizeFor(
   maxMessageSize: number | null | undefined,
   preferred: number = DEFAULT_FRAGMENT_SIZE,
 ): number {
+  if (!Number.isInteger(preferred) || preferred < 1)
+    throw new RangeError(`fragment size must be a positive integer, got ${preferred}`);
   const mms =
     maxMessageSize && Number.isFinite(maxMessageSize)
       ? maxMessageSize
       : DEFAULT_SCTP_MAX_MESSAGE_SIZE;
-  return Math.max(1, Math.min(preferred, mms - HEADER_SIZE));
+  if (mms <= HEADER_SIZE)
+    throw new RangeError(`SCTP max message size ${mms} cannot hold a frame header`);
+  return Math.min(preferred, Math.floor(mms) - HEADER_SIZE);
 }
 
 export interface WebRTCAdapterOptions {

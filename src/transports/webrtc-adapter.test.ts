@@ -99,6 +99,10 @@ describe('WebRTC binding helpers', () => {
     expect(fragmentSizeFor(null, 1 << 20)).toBe(65536 - 8);
     expect(fragmentSizeFor(Infinity, 1 << 20)).toBe(65536 - 8);
     expect(fragmentSizeFor(8192)).toBe(8192 - 8);
+    expect(fragmentSizeFor(9)).toBe(1);
+    expect(() => fragmentSizeFor(8)).toThrow(RangeError);
+    expect(() => fragmentSizeFor(65536, 0)).toThrow(RangeError);
+    expect(() => fragmentSizeFor(65536, 1.5)).toThrow(RangeError);
   });
 });
 
