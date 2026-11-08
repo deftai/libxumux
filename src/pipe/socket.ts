@@ -30,7 +30,11 @@ export interface PipeSocketOptions {
 interface Piped {
   dest: Writable;
   stopped: boolean;
+  /** pause() was called: read nothing until resume(). */
+  paused: boolean;
   stop: () => void;
+  /** Wakes the copy to look again. */
+  wake: () => void;
 }
 
 /** How this side is ending the pipe, set just before `destroy()`. */
@@ -198,21 +202,41 @@ export class PipeSocket extends Duplex {
     if (this.copying) throw new Error('a PipeSocket is piped to one destination at a time');
     const w = dest as unknown as Writable;
     if (this.readableFlowing) this.pause();
-    const piped: Piped = { dest: w, stopped: false, stop: noop };
+    const piped: Piped = { dest: w, stopped: false, paused: false, stop: noop, wake: noop };
     this.piped = piped;
     const doEnd = options?.end !== false && w !== process.stdout && w !== process.stderr;
+    // However the copy stops (EOF, a failure, the destination finishing or closing), the
+    // destination hears 'unpipe' once, as from Readable.pipe(); unpipe() already sent it.
+    const detach = (end: boolean): void => {
+      if (this.piped === piped) this.piped = null;
+      if (piped.stopped) return;
+      piped.stopped = true;
+      if (end) w.end();
+      w.emit('unpipe', this);
+    };
     w.emit('pipe', this);
     this.copy(w, true, piped).then(
-      () => {
-        if (this.piped === piped) this.piped = null;
-        if (doEnd && !piped.stopped) w.end();
-      },
-      () => {
-        // Errors reach the streams' own 'error' listeners; a failed copy just stops.
-        if (this.piped === piped) this.piped = null;
-      },
+      () => detach(doEnd),
+      // Errors reach the streams' own 'error' listeners; a failed copy just stops.
+      () => detach(false),
     );
     return dest;
+  }
+
+  /** While piping, holds the copy until {@link resume}, as for `Readable.pipe()`. */
+  override pause(): this {
+    if (this.piped) this.piped.paused = true;
+    return super.pause();
+  }
+
+  /** Lets a paused pipe go on. */
+  override resume(): this {
+    const piped = this.piped;
+    if (piped?.paused) {
+      piped.paused = false;
+      piped.wake();
+    }
+    return super.resume();
   }
 
   /** Stop piping into `dest` (or any destination). Unread bytes stay unread, without credit. */
@@ -301,6 +325,7 @@ export class PipeSocket extends Duplex {
         offErrorLater(dest, [onDestError], settled.has(dest));
       }
     };
+    if (piped) piped.wake = poke;
     if (piped)
       piped.stop = () => {
         // Synchronously, so a resume() right after unpipe() is not held back by 'readable'.
@@ -316,7 +341,7 @@ export class PipeSocket extends Duplex {
           if (pending === 0) return total;
         } else if (this.destroyed) {
           throw new Error('pipe destroyed');
-        } else if (!dest.writableNeedDrain || this.failure) {
+        } else if ((!dest.writableNeedDrain && !piped?.paused) || this.failure) {
           // After a failure, keep passing on the bytes that came before it, without
           // waiting for a write the failure holds (this socket as its own destination).
           this.holding = true;

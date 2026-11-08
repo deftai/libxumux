@@ -339,6 +339,72 @@ describe('PipeSocket', () => {
     expect(credit.returned).toBe(1500);
   });
 
+  it('pause() holds a pipe, without credit, until resume()', async () => {
+    const { a, b } = await pipePair({ maxChannelWindow: -1 });
+    const credit = creditLog(b);
+    const sink = slowSink(0);
+    b.pipe(sink.stream);
+    await write(a, Buffer.alloc(100));
+    await later(20);
+    expect(sink.written).toBe(100);
+    b.pause();
+    expect(b.isPaused()).toBe(true);
+    await write(a, Buffer.alloc(200));
+    await later(20);
+    expect(sink.written).toBe(100);
+    expect(credit.returned).toBe(100);
+    expect(b.readableLength).toBe(200);
+    b.resume();
+    await later(20);
+    expect(sink.written).toBe(300);
+    expect(credit.returned).toBe(300);
+  });
+
+  it("emits 'unpipe' once however the pipe stops", async () => {
+    const count = (w: Writable) => {
+      const n = { unpipe: 0 };
+      w.on('unpipe', () => n.unpipe++);
+      return n;
+    };
+    // The peer's EOF (the destination is ended), and the same with { end: false }.
+    for (const end of [true, false]) {
+      const { a, b } = await pipePair();
+      const sink = slowSink(0);
+      const n = count(sink.stream);
+      b.pipe(sink.stream, { end });
+      a.end('x');
+      await new Promise((r) => b.once('end', r));
+      await later(20);
+      expect(n.unpipe).toBe(1);
+      expect(sink.stream.writableEnded).toBe(end);
+    }
+    // The destination fails, or is ended by someone else.
+    const { a, b } = await pipePair();
+    const bad = new Writable({ write: (_c, _e, cb) => cb(new Error('disk full')) });
+    bad.on('error', () => undefined);
+    const nb = count(bad);
+    b.pipe(bad);
+    await write(a, 'x');
+    await later(20);
+    expect(nb.unpipe).toBe(1);
+    const { b: c } = await pipePair();
+    const sink = slowSink(0);
+    const nc = count(sink.stream);
+    c.pipe(sink.stream);
+    sink.stream.end();
+    await later(20);
+    expect(nc.unpipe).toBe(1);
+    // unpipe() itself, and then nothing more.
+    const { a: d, b: e } = await pipePair();
+    const s2 = slowSink(0);
+    const nd = count(s2.stream);
+    e.pipe(s2.stream);
+    e.unpipe(s2.stream);
+    d.end('x');
+    await later(20);
+    expect(nd.unpipe).toBe(1);
+  });
+
   it('pipe() stops at a destination error, which reaches its listeners', async () => {
     const { a, b } = await pipePair({ maxChannelWindow: -1 });
     const credit = creditLog(b);
