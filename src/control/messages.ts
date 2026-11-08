@@ -5,6 +5,12 @@
 
 export type Version = [number, number, number];
 
+/**
+ * `extensionParams` of HELLO or WELCOME (core §3.8): parameters keyed by extension name
+ * (`name/major`). Each value is defined by its extension's document.
+ */
+export type ExtensionParams = Record<string, unknown>;
+
 /** Channel request (HELLO `channels[]` and OPEN_CHANNEL body). */
 export interface ChannelRequest {
   id: number;
@@ -46,6 +52,7 @@ export interface HelloMessage extends Limits {
   version: Version;
   application?: string;
   extensions?: string[];
+  extensionParams?: ExtensionParams;
   channels?: ChannelRequest[];
   auth?: Record<string, unknown>;
 }
@@ -54,6 +61,7 @@ export interface HelloMessage extends Limits {
 export interface WelcomeMessage extends Limits {
   version: Version;
   extensions?: string[];
+  extensionParams?: ExtensionParams;
   channels?: ChannelAccept[];
   rejected?: ChannelRefusal[];
 }

@@ -99,7 +99,7 @@ export class RawPeer {
 
   /** Act as a client: send HELLO, return the WELCOME frame. */
   async helloAndWelcome(hello: Record<string, unknown> = {}): Promise<Frame> {
-    this.send(ctrl(ControlType.HELLO, { version: [0, 2, 0], ...hello }));
+    this.send(ctrl(ControlType.HELLO, { version: [0, 3, 0], ...hello }));
     return this.control(ControlType.WELCOME);
   }
 
@@ -111,7 +111,7 @@ export class RawPeer {
       reliable: true,
       ordered: true,
     }));
-    this.send(ctrl(ControlType.WELCOME, { version: [0, 2, 0], channels, ...welcome }));
+    this.send(ctrl(ControlType.WELCOME, { version: [0, 3, 0], channels, ...welcome }));
     return hello;
   }
 

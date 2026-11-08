@@ -207,6 +207,7 @@ export function decodeHello(p: Uint8Array): HelloMessage {
     version: version(o, w),
     application: optStr(o, 'application', w),
     extensions: strArray(o, 'extensions', w),
+    extensionParams: optObj(o, 'extensionParams', w),
     ...limits(o, w),
     channels: optArray(o, 'channels', w).map((c) => channelRequest(c, w)),
     auth: optObj(o, 'auth', w),
@@ -219,6 +220,7 @@ export function decodeWelcome(p: Uint8Array): WelcomeMessage {
   return {
     version: version(o, w),
     extensions: strArray(o, 'extensions', w),
+    extensionParams: optObj(o, 'extensionParams', w),
     ...limits(o, w),
     channels: optArray(o, 'channels', w).map((c) => channelAccept(c, w)),
     rejected: optArray(o, 'rejected', w).map((c) => channelRefusal(c, w)),

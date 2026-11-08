@@ -1,5 +1,5 @@
 /**
- * libxumux: TypeScript reference implementation of xumux 0.2.
+ * libxumux: TypeScript reference implementation of xumux 0.3.
  *
  * @see https://github.com/deftai/xumux/blob/main/spec/core.md
  */
@@ -16,6 +16,10 @@ export type {
   AcceptResult,
   ChannelDecision,
   ChannelPolicy,
+  ExtensionDecision,
+  FirstFrame,
+  FirstFrameDecision,
+  FirstFrameHandler,
   CloseInfo,
   ChannelCloseEventDetail,
 } from './session.js';
@@ -44,6 +48,8 @@ export {
   DEFAULT_CONNECTION_WINDOW,
   DEFAULT_MAX_CONTROL_QUEUE,
   DEFAULT_MAX_CHANNELS,
+  EXTENSION_CONTROL_TYPE_MIN,
+  EXTENSION_CONTROL_TYPE_MAX,
 } from './codec/constants.js';
 export type { Frame } from './codec/frame.js';
 export { encodeFrame } from './codec/encode-frame.js';
@@ -51,6 +57,7 @@ export { decodeFrame, validateFrame, StreamFramer } from './codec/decode-frame.j
 
 export type {
   Version,
+  ExtensionParams,
   HelloMessage,
   WelcomeMessage,
   ChannelRequest,

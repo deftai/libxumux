@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### xumux 0.3 core (breaking on the wire)
+
+Implements the xumux 0.3.0-draft core specification (deftai/xumux `spec/core.md` at `v0.3.0-draft`).
+
+- **BREAKING**: `PROTOCOL_VERSION` is `[0, 3, 0]` and `XUMUX_VERSION` is `0.3.0-draft`. 0.x minors are incompatible (core §3.5): a 0.2 HELLO is refused with CLOSE `4006`, and a 0.2 WELCOME makes the client close with `1002`. Frame layouts are unchanged.
+- `extensionParams` in HELLO and WELCOME (core §3.8), typed as `ExtensionParams` on `HelloMessage` and `WelcomeMessage`. A value that is not a JSON object closes with `4001`. Keys for extensions that are not listed or not accepted are ignored.
+  - Client: `ConnectOptions.extensionParams` (only keys for requested extensions are sent) and `ConnectOptions.checkExtensionParams(extension, params)`, which closes with `4001` when it returns false or throws for an accepted extension.
+  - Server: `AcceptOptions.negotiateExtension(extension, params, hello)` returns an `ExtensionDecision`: `true`, `{ params }` for WELCOME, or `false` to leave the extension out. WELCOME never carries a key for an extension it does not accept.
+  - `ConnectResult` and `AcceptResult` gain `extensions` (accepted) and `extensionParams` (the peer's, for accepted extensions only).
+  - HELLO and WELCOME, with their `extensionParams`, must fit in 65536 bytes: `connect()` rejects with `RangeError` before sending a larger HELLO, and a server whose WELCOME would be larger refuses the connection with `1001`.
+- Extension-defined first frames (core §3.1): `AcceptOptions.firstFrames` maps a control type in `0x30`–`0x7F` to a `FirstFrameHandler`, which gets the `FirstFrame` (type and payload) that arrived instead of HELLO and returns a `FirstFrameDecision` refusal, sent as CLOSE. A first frame of any other type still closes with `1002`. `EXTENSION_CONTROL_TYPE_MIN` and `EXTENSION_CONTROL_TYPE_MAX` are exported.
+- Conformance: `tests/fixtures/xumux-vectors.json` is the 0.3 `conformance/vectors.json`, and CI runs the behavioural suite from the spec's `v0.3.0-draft` tag (57 of 57 pass).
+- The pipe/1 interop e2e test needs a libxumux-go that speaks 0.3.
+
 ### Changed
 
 - Development tooling: vitest 5 and `@vitest/coverage-v8` 5 (were 3), tsup 9 (was 8), and in-range updates of the rest, which clears every `npm audit` advisory (all were in dev dependencies; the package itself has none). An npm override moves typescript-eslint's `minimatch` to 11.0.5. Building and testing now need Node 22.12 or later; the published package still supports Node 20. No library changes, apart from sharing one `ignore` rejection handler, which the newer coverage tool counts once instead of once per call site.

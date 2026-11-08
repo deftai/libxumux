@@ -1,8 +1,8 @@
 # libxumux
 
-TypeScript reference implementation of [xumux](https://github.com/deftai/xumux) **0.2**: named, typed channels with per-channel flow control and probes, over any transport.
+TypeScript reference implementation of [xumux](https://github.com/deftai/xumux) **0.3**: named, typed channels with per-channel flow control and probes, over any transport.
 
-> **Status**: implements the xumux 0.2.0-draft core ([spec/core.md](https://github.com/deftai/xumux/blob/main/spec/core.md)) and passes its [conformance vectors](tests/fixtures/xumux-vectors.json), plus the [pipe/1 profile](#pipes-pipe1). Not yet implemented: the `webrtc-multichannel/1` and `session-resume/1` extensions, and multi-stream QUIC.
+> **Status**: implements the xumux 0.3.0-draft core ([spec/core.md](https://github.com/deftai/xumux/blob/v0.3.0-draft/spec/core.md)) and passes its [conformance vectors](tests/fixtures/xumux-vectors.json), plus the [pipe/1 profile](#pipes-pipe1). Not yet implemented: the `webrtc-multichannel/1` and `session-resume/1` extensions, and multi-stream QUIC. 0.2 and 0.3 peers refuse each other with `4006`.
 
 ## Install
 
@@ -187,6 +187,25 @@ await client.connect(); // HELLO waits for the DataChannel to open
 - If the DataChannel hasn't opened about 10 s after the offer, the binding recommends falling back to WebSocket.
 
 A custom transport implements `TransportAdapter`: `kind: 'message' | 'stream'`, `send(bytes): void | Promise<void>` (return a promise to apply backpressure), `receive(): AsyncIterable<Uint8Array>` and `close()`.
+
+## Extensions
+
+The core's extension hooks are exposed for code that implements an extension:
+
+- **`extensionParams`** (core §3.8). The client sends parameters with `connect({ extensions, extensionParams })`; only keys for requested extensions are sent. The server decides per extension with `accept({ extensions, negotiateExtension })`, returning `true`, `{ params }` (sent in WELCOME) or `false` (leave the extension out). Keys for extensions that are not accepted are ignored on both sides and never sent in WELCOME. The client checks WELCOME parameters with `connect({ checkExtensionParams })`; `false` or a throw closes with `4001`. Both results carry `extensions` and the peer's `extensionParams` for the accepted extensions.
+- **First frames** (core §3.1). `accept({ firstFrames: { [type]: handler } })` lets an extension claim a control type in `0x30`–`0x7F` as the first frame of a transport, instead of HELLO. The handler answers with a refusal (`{ code, reason }`, sent as CLOSE). With no handler for the type, the server closes with `1002`.
+
+```ts
+await server.accept({
+  extensions: ['example/1'],
+  negotiateExtension: (ext, params) =>
+    (params as { level?: number } | undefined)?.level === 3 ? { params: { level: 2 } } : false,
+});
+```
+
+## Migrating from 0.2
+
+xumux 0.3 changes no frame layouts, but the version is `[0, 3, 0]` and 0.x minors are incompatible, so a 0.3 peer and a 0.2 peer refuse each other with `4006` ([spec §3.5](https://github.com/deftai/xumux/blob/v0.3.0-draft/spec/core.md#35-version-negotiation)). Upgrade both ends together. The API is backwards compatible; `ConnectResult` and `AcceptResult` gain `extensions` and `extensionParams`.
 
 ## Migrating from 0.1
 
