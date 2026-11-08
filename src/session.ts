@@ -1035,6 +1035,12 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
    * Detach the base path: close its transport without sending anything, and keep the
    * session, its channels and their queued sends as they are. Keepalive stops and pending
    * PINGs are abandoned (rejected, but not counted as lost). Emits `'detach'`.
+   *
+   * Frames that were being written when the path was lost are rejected (a write that never
+   * finishes must not hold up its channel), and the transport may have lost them. Making them
+   * good is the extension's job: session-resume/1 retains every frame it may need and replays
+   * it, so its frames are never rejected here. Without that, a fragmented message cut short
+   * leaves the peer's reassembly incomplete.
    */
   protected detachBasePath(reason: string): void {
     const path = this.path;
