@@ -322,11 +322,14 @@ describe('PipeSocket', () => {
 
   it('writeTo() rejects when the destination fails while the source is idle', async () => {
     const { b } = await pipePair();
-    const dest = new Writable({ write: (_c, _e, cb) => cb() });
+    // emitClose false: the copy's listeners must go even without a 'close'.
+    const dest = new Writable({ emitClose: false, write: (_c, _e, cb) => cb() });
     const copied = b.writeTo(dest);
     await later(20);
     dest.destroy(new Error('boom'));
     await expect(copied).rejects.toThrow('boom');
+    await later(10);
+    expect(dest.listenerCount('error') + dest.listenerCount('close')).toBe(0);
   });
 
   it('never sends DATA larger than one frame, even for big writes', async () => {
