@@ -34,4 +34,4 @@ export interface TransportAdapter {
 }
 
 /** xumux protocol version this library implements. */
-export const XUMUX_VERSION = '0.2.0-draft' as const;
+export const XUMUX_VERSION = '0.3.0-draft' as const;

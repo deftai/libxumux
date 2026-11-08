@@ -185,6 +185,8 @@ describe('pipe/1 over TCP', () => {
 
 // ─── Interop with libxumux-go ──────────────────────────────────────────────────
 
+// LIBXUMUX_GO_DIR must be a libxumux-go that speaks the same xumux version (0.3): 0.x
+// minors refuse each other, so against a 0.2 checkout the handshake closes with 4006.
 const goDir = process.env.LIBXUMUX_GO_DIR;
 const haveGo = !!goDir && spawnSync('go', ['version']).status === 0;
 

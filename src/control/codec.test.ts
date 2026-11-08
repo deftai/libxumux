@@ -26,14 +26,14 @@ describe('control decoders', () => {
   it('accept valid messages and ignore unknown fields', () => {
     const h = decodeHello(
       enc({
-        version: [0, 2, 0],
+        version: [0, 3, 0],
         future: true,
         channels: [{ id: 1, name: 'a', reliable: true, ordered: false, metadata: { x: 1 } }],
       }),
     );
     expect(h.channels![0]).toMatchObject({ id: 1, name: 'a', ordered: false, metadata: { x: 1 } });
     expect(
-      decodeWelcome(enc({ version: [0, 2, 0], rejected: [{ id: 3, code: 4010 }] })).rejected,
+      decodeWelcome(enc({ version: [0, 3, 0], rejected: [{ id: 3, code: 4010 }] })).rejected,
     ).toEqual([{ id: 3, code: 4010, reason: undefined }]);
     expect(decodeClose(enc({ code: 1000, reason: 'bye' }))).toEqual({ code: 1000, reason: 'bye' });
     expect(decodeError(enc({ code: 4003, channel: 2 }))).toMatchObject({ code: 4003, channel: 2 });
@@ -46,9 +46,9 @@ describe('control decoders', () => {
     ['array payload', () => decodeHello(enc([1]))],
     ['missing version', () => decodeHello(enc({}))],
     ['short version', () => decodeHello(enc({ version: [0, 2] }))],
-    ['extensions not strings', () => decodeHello(enc({ version: [0, 2, 0], extensions: [1] }))],
-    ['channels not array', () => decodeHello(enc({ version: [0, 2, 0], channels: {} }))],
-    ['channel not object', () => decodeHello(enc({ version: [0, 2, 0], channels: [1] }))],
+    ['extensions not strings', () => decodeHello(enc({ version: [0, 3, 0], extensions: [1] }))],
+    ['channels not array', () => decodeHello(enc({ version: [0, 3, 0], channels: {} }))],
+    ['channel not object', () => decodeHello(enc({ version: [0, 3, 0], channels: [1] }))],
     [
       'channel name missing',
       () => decodeOpenChannel(enc({ id: 1, reliable: true, ordered: true })),
@@ -64,9 +64,17 @@ describe('control decoders', () => {
     ],
     ['non-integer id', () => decodeCloseChannel(enc({ id: 1.5 }))],
     ['id out of range', () => decodeCloseChannel(enc({ id: 70000 }))],
-    ['negative pingInterval', () => decodeHello(enc({ version: [0, 2, 0], pingInterval: -1 }))],
+    ['negative pingInterval', () => decodeHello(enc({ version: [0, 3, 0], pingInterval: -1 }))],
     ['reason not string', () => decodeClose(enc({ code: 1000, reason: 5 }))],
-    ['auth not object', () => decodeHello(enc({ version: [0, 2, 0], auth: 'x' }))],
+    ['auth not object', () => decodeHello(enc({ version: [0, 3, 0], auth: 'x' }))],
+    [
+      'HELLO extensionParams not object',
+      () => decodeHello(enc({ version: [0, 3, 0], extensionParams: ['x'] })),
+    ],
+    [
+      'WELCOME extensionParams not object',
+      () => decodeWelcome(enc({ version: [0, 3, 0], extensionParams: null })),
+    ],
   ])('rejects %s with 4001', (_n, fn) => {
     expect(code(fn)).toBe(4001);
   });

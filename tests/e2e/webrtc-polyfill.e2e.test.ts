@@ -23,16 +23,31 @@ afterAll(() => nodeDataChannel.cleanup());
 
 type PC = InstanceType<typeof RTCPeerConnection>;
 
-/** Offer/answer and trickled candidates, wired directly between the two peers. */
+/**
+ * Offer/answer and trickled candidates, wired directly between the two peers. A candidate
+ * can be gathered before the other side has its remote description (b's candidates start
+ * with its answer, before `a.setRemoteDescription`), and libdatachannel throws on those, so
+ * each side's candidates wait until the other side has its remote description.
+ */
 async function signal(a: PC, b: PC): Promise<void> {
-  a.onicecandidate = (e) => void (e.candidate && b.addIceCandidate(e.candidate));
-  b.onicecandidate = (e) => void (e.candidate && a.addIceCandidate(e.candidate));
+  const trickle = (from: PC, to: PC, ready: Promise<void>) => {
+    from.onicecandidate = (e) => {
+      const c = e.candidate;
+      if (c) void ready.then(() => to.addIceCandidate(c));
+    };
+  };
+  let aReady!: () => void;
+  let bReady!: () => void;
+  trickle(a, b, new Promise<void>((r) => (bReady = r)));
+  trickle(b, a, new Promise<void>((r) => (aReady = r)));
   const offer = await a.createOffer();
   await a.setLocalDescription(offer);
   await b.setRemoteDescription(offer);
+  bReady();
   const answer = await b.createAnswer();
   await b.setLocalDescription(answer);
   await a.setRemoteDescription(answer);
+  aReady();
 }
 
 interface Pair {
@@ -144,7 +159,7 @@ describe('WebRTC binding over the standard RTCDataChannel API (node-datachannel 
           const ch = (e as CustomEvent<XumuxChannel>).detail;
           void (async () => {
             const h = createHash('sha256');
-            for (let n = 0; n < total; ) {
+            for (let n = 0; n < total;) {
               const m = await ch.receive();
               if (!m) break;
               h.update(m.payload);

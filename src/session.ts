@@ -1,5 +1,5 @@
 /**
- * xumux 0.2 session: XumuxPeer, XumuxClient, XumuxServer.
+ * xumux 0.3 session: XumuxPeer, XumuxClient, XumuxServer.
  *
  * One transport → one session → N channels. The session owns framing, magic bytes,
  * limits, the outbound scheduler (control first, then channels round-robin), flow
@@ -25,6 +25,9 @@ import {
   DEFAULT_MAX_MESSAGE_SIZE,
   DEFAULT_PING_INTERVAL,
   DEFAULT_PING_TIMEOUT,
+  EXTENSION_CONTROL_TYPE_MAX,
+  EXTENSION_CONTROL_TYPE_MIN,
+  CONTROL_MAX_PAYLOAD,
   FrameFlags,
   MAX_CHANNEL_ID,
   MAX_WINDOW,
@@ -64,6 +67,7 @@ import type {
   ChannelRefusal,
   ChannelRequest,
   ErrorMessage,
+  ExtensionParams,
   HelloMessage,
   Limits,
   Version,
@@ -141,6 +145,18 @@ export interface XumuxOptions {
 export interface ConnectOptions {
   application?: string;
   extensions?: string[];
+  /**
+   * HELLO `extensionParams` (core §3.8), keyed by extension name. Keys for extensions that
+   * are not in `extensions` are not sent. Counts toward the 65536-byte HELLO limit.
+   */
+  extensionParams?: ExtensionParams;
+  /**
+   * Validate the WELCOME parameters of an extension the server accepted. Called once per
+   * accepted extension, with its WELCOME `extensionParams` value (undefined if WELCOME has
+   * none). Returning false, or throwing, closes the connection with 4001 and rejects
+   * connect() (core §3.8). Default: every value is valid.
+   */
+  checkExtensionParams?: (extension: string, params: unknown) => boolean;
   auth?: Record<string, unknown>;
   /** Channels to open in HELLO. IDs are assigned by the client. */
   channels?: Array<Omit<ChannelRequest, 'id'>>;
@@ -148,6 +164,10 @@ export interface ConnectOptions {
 
 export interface ConnectResult {
   welcome: WelcomeMessage;
+  /** Extensions the server accepted (WELCOME `extensions`). */
+  extensions: string[];
+  /** WELCOME `extensionParams`, restricted to accepted extensions (other keys are ignored). */
+  extensionParams: ExtensionParams;
   /** Accepted channels, in HELLO order. */
   channels: XumuxChannel[];
   rejected: ChannelRefusal[];
@@ -160,10 +180,61 @@ export interface AcceptOptions {
   ) => void | { code: number; reason?: string } | Promise<void | { code: number; reason?: string }>;
   /** Extensions this server supports. WELCOME lists the intersection with the client's request. */
   extensions?: string[];
+  /**
+   * Negotiate the parameters of a supported extension the client requested (core §3.8).
+   * Called once per such extension, in HELLO order, with its HELLO `extensionParams` value
+   * (undefined if HELLO has none). Return `true` to accept it without WELCOME parameters,
+   * `{ params }` to accept it and send `params` in WELCOME `extensionParams`, or `false` to
+   * leave it out of WELCOME (for example because its HELLO parameters are unacceptable).
+   * Throwing counts as `false`. Default: accept, without parameters. WELCOME never carries
+   * parameters for an extension it does not accept.
+   */
+  negotiateExtension?: (
+    extension: string,
+    params: unknown,
+    hello: HelloMessage,
+  ) => ExtensionDecision | Promise<ExtensionDecision>;
+  /**
+   * Extension-defined first frames (core §3.1), keyed by control type (0x30–0x7F, as
+   * allocated to the extension). When the client's first frame on the transport is a control
+   * frame of one of these types instead of HELLO, its handler decides the answer; the HELLO
+   * timeout applies to its arrival as to HELLO's. A first frame of any other type than HELLO
+   * still closes with 1002.
+   *
+   * In this version the handler can only refuse: the server sends CLOSE with the returned
+   * code (core §3.7) and accept() rejects with {@link XumuxClosedError}. A handler that
+   * throws refuses with the error's code if it is an {@link XumuxProtocolError}, else 1002.
+   * Answering the frame (as session-resume/1's RESUMED does) and handing the transport to
+   * an existing connection is left to the extension implementations that need it.
+   */
+  firstFrames?: Readonly<Record<number, FirstFrameHandler>>;
 }
+
+/** Server decision on one requested extension (see {@link AcceptOptions.negotiateExtension}). */
+export type ExtensionDecision = boolean | { params: unknown };
+
+/** An extension-defined first frame that arrived instead of HELLO (core §3.1). */
+export interface FirstFrame {
+  /** Control type, 0x30–0x7F. */
+  type: number;
+  /** The raw payload; its format is the extension's. */
+  payload: Uint8Array;
+}
+
+/** Answer to an extension-defined first frame. Only refusal (CLOSE) is defined so far. */
+export type FirstFrameDecision = { code: number; reason?: string };
+
+/** Handles an extension-defined first frame (see {@link AcceptOptions.firstFrames}). */
+export type FirstFrameHandler = (
+  frame: FirstFrame,
+) => FirstFrameDecision | Promise<FirstFrameDecision>;
 
 export interface AcceptResult {
   hello: HelloMessage;
+  /** Extensions this server accepted (WELCOME `extensions`). */
+  extensions: string[];
+  /** HELLO `extensionParams`, restricted to accepted extensions (other keys are ignored). */
+  extensionParams: ExtensionParams;
   /** HELLO channels this server accepted. */
   channels: XumuxChannel[];
 }
@@ -177,6 +248,9 @@ export interface ChannelCloseEventDetail extends ChannelCloseInfo {
 }
 
 type SessionState = 'idle' | 'handshaking' | 'open' | 'closing' | 'closed';
+
+/** What the handshake waits for: HELLO (server), WELCOME (client), or an extension first frame. */
+type HandshakeMessage = HelloMessage | WelcomeMessage | { firstFrame: FirstFrame };
 
 interface Out {
   bytes: Uint8Array;
@@ -273,6 +347,34 @@ export function versionsCompatible(a: Version, b: Version): boolean {
   return a[0] !== 0 || a[1] === b[1];
 }
 
+/**
+ * The entries of `params` for the extensions in `names`, as own properties of a fresh object.
+ * Keys for any other extension are ignored (core §3.8).
+ */
+function pickParams(
+  params: ExtensionParams | undefined,
+  names: readonly string[],
+): ExtensionParams {
+  const out: ExtensionParams = {};
+  if (!params) return out;
+  for (const n of names) if (Object.hasOwn(params, n)) setParam(out, n, params[n]);
+  return out;
+}
+
+/** One entry, or undefined: never a value inherited from Object.prototype. */
+const getParam = (params: ExtensionParams, name: string): unknown =>
+  Object.hasOwn(params, name) ? params[name] : undefined;
+
+/** Set one entry as an own property, even for a name such as `__proto__`. */
+function setParam(params: ExtensionParams, name: string, value: unknown): void {
+  Object.defineProperty(params, name, {
+    value,
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  });
+}
+
 /** An AbortSignal's reason, as an Error. */
 const abortReason = (signal: AbortSignal): Error =>
   signal.reason instanceof Error ? signal.reason : new Error('aborted', { cause: signal.reason });
@@ -342,12 +444,14 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
 
   // Handshake plumbing
   protected handshakeWaiter: {
-    resolve: (m: HelloMessage | WelcomeMessage) => void;
+    resolve: (m: HandshakeMessage) => void;
     reject: (e: Error) => void;
   } | null = null;
   private receiving = false;
   /** Client only: frames received after WELCOME but before connect() has processed it. */
   protected afterHandshake: Frame[] | null = null;
+  /** Server only: control types an extension has claimed as first frames (core §3.1). */
+  protected firstFrameTypes: ReadonlySet<number> = new Set();
 
   constructor(
     protected readonly transport: TransportAdapter,
@@ -689,7 +793,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
   }
 
   /** Wait for HELLO or WELCOME (whichever the role expects), a CLOSE, or the timeout. */
-  protected awaitHandshake(): Promise<HelloMessage | WelcomeMessage> {
+  protected awaitHandshake(): Promise<HandshakeMessage> {
     return new Promise((resolve, reject) => {
       const timer = unref(
         setTimeout(() => {
@@ -956,6 +1060,13 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
       this.handshakeWaiter = null;
       if (this.role === 'client') this.afterHandshake = [];
       w.resolve(msg);
+      return;
+    }
+    // An extension-defined first frame instead of HELLO (core §3.1).
+    if (isControl && this.handshakeWaiter && this.firstFrameTypes.has(f.type)) {
+      const w = this.handshakeWaiter;
+      this.handshakeWaiter = null;
+      w.resolve({ firstFrame: { type: f.type, payload: f.payload } });
       return;
     }
     // The server may send right after WELCOME (OPEN_CHANNEL, data, probes) and those frames
@@ -1563,18 +1674,17 @@ export class XumuxClient extends XumuxPeer {
   /** Send HELLO and wait for WELCOME. Rejects with XumuxClosedError if the server refuses. */
   async connect(opts: ConnectOptions = {}): Promise<ConnectResult> {
     if (this.state !== 'idle') throw new Error('connect() may only be called once');
-    this.state = 'handshaking';
-    this.startReceiving();
 
     const requests = opts.channels ?? [];
     const ids = this.allocateIds(requests.length);
     const channels: ChannelRequest[] = requests.map((r, i) => ({ ...r, id: ids[i]! }));
-    for (const req of channels) this.createSlot(req, true, 'opening');
+    const extensionParams = pickParams(opts.extensionParams, opts.extensions ?? []);
 
     const hello: HelloMessage = {
       version: [...PROTOCOL_VERSION] as Version,
       ...(opts.application !== undefined && { application: opts.application }),
       ...(opts.extensions?.length && { extensions: opts.extensions }),
+      ...(Object.keys(extensionParams).length && { extensionParams }),
       maxFramePayload: this.local.maxFramePayload,
       maxMessageSize: this.local.maxMessageSize,
       initialWindow: this.local.initialWindow,
@@ -1583,17 +1693,43 @@ export class XumuxClient extends XumuxPeer {
       ...(channels.length && { channels }),
       ...(opts.auth && { auth: opts.auth }),
     };
+    const frame = helloFrame(hello);
+    // Like every channel-0 payload, HELLO (with its extensionParams) is capped (core §3.1).
+    if (frame.payload.length > CONTROL_MAX_PAYLOAD)
+      throw new RangeError(
+        `HELLO is ${frame.payload.length} bytes, over the ${CONTROL_MAX_PAYLOAD}-byte limit`,
+      );
+    this.state = 'handshaking';
+    this.startReceiving();
+    for (const req of channels) this.createSlot(req, true, 'opening');
     const waiting = this.awaitHandshake();
-    void this.sendControl(helloFrame(hello)).catch(ignore);
+    void this.sendControl(frame).catch(ignore);
     const welcome = (await waiting) as WelcomeMessage;
+    const extensions = [...new Set(welcome.extensions ?? [])];
+    let welcomeParams: ExtensionParams = {};
 
     try {
       if (!versionsCompatible(welcome.version, PROTOCOL_VERSION as Version))
         throw protocolError(`incompatible server version ${welcome.version.join('.')}`);
       this.setRemoteLimits(welcome);
       const offered = new Set(opts.extensions ?? []);
-      if (!(welcome.extensions ?? []).every((e) => offered.has(e)))
+      if (!extensions.every((e) => offered.has(e)))
         throw protocolError('WELCOME accepted an extension that was not requested');
+      // Keys for extensions that were not accepted are ignored (core §3.8).
+      welcomeParams = pickParams(welcome.extensionParams, extensions);
+      for (const ext of extensions) {
+        let ok: boolean;
+        try {
+          ok = opts.checkExtensionParams?.(ext, getParam(welcomeParams, ext)) ?? true;
+        } catch {
+          ok = false;
+        }
+        if (!ok)
+          throw new XumuxProtocolError(
+            CloseCode.INVALID_MESSAGE,
+            `WELCOME extensionParams for ${ext} are invalid`,
+          );
+      }
       const answered = new Set<number>();
       const requested = new Set(ids);
       for (const c of [...(welcome.channels ?? []), ...(welcome.rejected ?? [])]) {
@@ -1624,7 +1760,13 @@ export class XumuxClient extends XumuxPeer {
       open.push(slot.ch);
     }
     this.replayAfterHandshake();
-    return { welcome, channels: open, rejected: welcome.rejected ?? [] };
+    return {
+      welcome,
+      extensions,
+      extensionParams: welcomeParams,
+      channels: open,
+      rejected: welcome.rejected ?? [],
+    };
   }
 
   private beginCloseFromError(e: unknown): void {
@@ -1642,14 +1784,36 @@ export class XumuxServer extends XumuxPeer {
   /** Wait for HELLO, validate it, decide on its channels, and send WELCOME (or CLOSE). */
   async accept(opts: AcceptOptions = {}): Promise<AcceptResult> {
     if (this.state !== 'idle') throw new Error('accept() may only be called once');
+    const firstFrames = opts.firstFrames ?? {};
+    const types = Object.keys(firstFrames).map(Number);
+    for (const t of types)
+      if (!Number.isInteger(t) || t < EXTENSION_CONTROL_TYPE_MIN || t > EXTENSION_CONTROL_TYPE_MAX)
+        throw new RangeError(`first-frame type ${t} is outside the extension range 0x30-0x7f`);
+    this.firstFrameTypes = new Set(types);
     this.state = 'handshaking';
     this.startReceiving();
-    const hello = (await this.awaitHandshake()) as HelloMessage;
+    const first = await this.awaitHandshake();
 
     const refuse = (code: number, reason: string): never => {
       this.beginClose(code, reason, false);
       throw new XumuxClosedError(code, reason, false);
     };
+
+    if ('firstFrame' in first) {
+      let d: FirstFrameDecision;
+      try {
+        d = await firstFrames[first.firstFrame.type]!(first.firstFrame);
+      } catch (e) {
+        d = {
+          code: e instanceof XumuxProtocolError ? e.code : CloseCode.PROTOCOL_ERROR,
+          reason: e instanceof Error ? e.message : String(e),
+        };
+      }
+      if (this.state !== 'handshaking')
+        throw new XumuxClosedError(CloseCode.GOING_AWAY, 'closed during handshake');
+      return refuse(d.code, d.reason ?? 'refused');
+    }
+    const hello = first as HelloMessage;
 
     if (!versionsCompatible(hello.version, PROTOCOL_VERSION as Version)) {
       refuse(CloseCode.VERSION_MISMATCH, `unsupported version ${hello.version.join('.')}`);
@@ -1681,7 +1845,23 @@ export class XumuxServer extends XumuxPeer {
       throw new XumuxClosedError(CloseCode.GOING_AWAY, 'closed during handshake');
 
     const supported = new Set(opts.extensions ?? []);
-    const extensions = (hello.extensions ?? []).filter((e) => supported.has(e));
+    const offered = pickParams(hello.extensionParams, hello.extensions ?? []);
+    const extensions: string[] = [];
+    const extensionParams: ExtensionParams = {};
+    for (const ext of new Set(hello.extensions ?? [])) {
+      if (!supported.has(ext)) continue;
+      let d: ExtensionDecision;
+      try {
+        d = opts.negotiateExtension
+          ? await opts.negotiateExtension(ext, getParam(offered, ext), hello)
+          : true;
+      } catch {
+        d = false;
+      }
+      if (d === false) continue;
+      extensions.push(ext);
+      if (d !== true && d.params !== undefined) setParam(extensionParams, ext, d.params);
+    }
     const accepted: ChannelAccept[] = [];
     const rejected: ChannelRefusal[] = [];
     const openReqs: ChannelRequest[] = [];
@@ -1712,6 +1892,7 @@ export class XumuxServer extends XumuxPeer {
     const welcome: WelcomeMessage = {
       version: [...PROTOCOL_VERSION] as Version,
       ...(extensions.length && { extensions }),
+      ...(Object.keys(extensionParams).length && { extensionParams }),
       maxFramePayload: this.local.maxFramePayload,
       maxMessageSize: this.local.maxMessageSize,
       initialWindow: this.local.initialWindow,
@@ -1720,9 +1901,30 @@ export class XumuxServer extends XumuxPeer {
       ...(accepted.length && { channels: accepted }),
       ...(rejected.length && { rejected }),
     };
+    let frame: Frame;
+    try {
+      frame = welcomeFrame(welcome);
+    } catch (e) {
+      // For example negotiateExtension returned params that JSON cannot encode.
+      return refuse(
+        CloseCode.GOING_AWAY,
+        `cannot encode WELCOME: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    // The server's extensionParams count toward the 65536-byte WELCOME limit (core §3.8).
+    if (frame.payload.length > CONTROL_MAX_PAYLOAD)
+      refuse(
+        CloseCode.GOING_AWAY,
+        `WELCOME would be ${frame.payload.length} bytes, over the ${CONTROL_MAX_PAYLOAD}-byte limit`,
+      );
     const channels = openReqs.map((req, i) => this.createSlot(req, false, 'open', accepted[i]).ch);
-    void this.sendControl(welcomeFrame(welcome)).catch(ignore);
+    void this.sendControl(frame).catch(ignore);
     this.enterOpen(pingInterval, pingTimeout);
-    return { hello, channels };
+    return {
+      hello,
+      extensions,
+      extensionParams: pickParams(hello.extensionParams, extensions),
+      channels,
+    };
   }
 }

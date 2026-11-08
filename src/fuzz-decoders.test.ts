@@ -53,9 +53,9 @@ const accept = { id: 1, reliable: true, ordered: true };
 
 /** A valid body for each JSON decoder, to mutate one field at a time. */
 const valid: Record<string, Record<string, unknown>> = {
-  decodeHello: { version: [0, 2, 0], ...limits, extensions: ['x'], channels: [request] },
+  decodeHello: { version: [0, 3, 0], ...limits, extensions: ['x'], channels: [request] },
   decodeWelcome: {
-    version: [0, 2, 0],
+    version: [0, 3, 0],
     ...limits,
     channels: [accept],
     rejected: [{ id: 3, code: 4010, reason: 'r' }],

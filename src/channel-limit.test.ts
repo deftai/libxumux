@@ -63,7 +63,7 @@ describe('maxChannels', () => {
     const channels = [];
     for (let id = 1; ; id += 2) {
       channels.push({ id, name: '', reliable: true, ordered: true });
-      const size = JSON.stringify({ version: [0, 2, 0], channels }).length;
+      const size = JSON.stringify({ version: [0, 3, 0], channels }).length;
       if (size > CONTROL_MAX_PAYLOAD - 100) {
         channels.pop();
         break;

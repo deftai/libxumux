@@ -106,7 +106,7 @@ describe('handshake', () => {
     await raw.control(ControlType.HELLO);
     raw.send(
       ctrl(ControlType.WELCOME, {
-        version: [0, 2, 0],
+        version: [0, 3, 0],
         channels: [{ id: 9, reliable: true, ordered: true }],
       }),
     );
@@ -134,8 +134,9 @@ describe('handshake', () => {
   });
 
   it('versionsCompatible follows core §3.5', () => {
-    expect(versionsCompatible([0, 2, 0], [0, 2, 5])).toBe(true);
-    expect(versionsCompatible([0, 2, 0], [0, 1, 0])).toBe(false);
+    expect(versionsCompatible([0, 3, 0], [0, 3, 5])).toBe(true);
+    expect(versionsCompatible([0, 3, 0], [0, 2, 0])).toBe(false);
+    expect(versionsCompatible([0, 3, 0], [0, 1, 0])).toBe(false);
     expect(versionsCompatible([1, 2, 0], [1, 0, 0])).toBe(true);
     expect(versionsCompatible([1, 0, 0], [2, 0, 0])).toBe(false);
   });
@@ -465,7 +466,7 @@ describe('edge paths', () => {
     raw.send({ channel: 1, type: 5, flags: 0, payload: te.encode('early') });
     raw.send(
       ctrl(ControlType.WELCOME, {
-        version: [0, 2, 0],
+        version: [0, 3, 0],
         channels: [{ id: 1, reliable: true, ordered: true }],
       }),
     );
@@ -560,7 +561,7 @@ describe('review regressions', () => {
     const client = new XumuxClient(transport, base);
     const p = client.connect();
     await raw.control(ControlType.HELLO);
-    const welcome = encodeFrame(ctrl(ControlType.WELCOME, { version: [0, 2, 0] }));
+    const welcome = encodeFrame(ctrl(ControlType.WELCOME, { version: [0, 3, 0] }));
     const open = encodeFrame(
       ctrl(ControlType.OPEN_CHANNEL, { id: 2, name: 'srv', reliable: true, ordered: true }),
     );
@@ -578,7 +579,7 @@ describe('review regressions', () => {
       onChannelRequest: () => later(30).then(() => true as const),
     });
     const acc = server.accept();
-    raw.send(ctrl(ControlType.HELLO, { version: [0, 2, 0], ...hello([{ id: 1, name: 'd' }]) }));
+    raw.send(ctrl(ControlType.HELLO, { version: [0, 3, 0], ...hello([{ id: 1, name: 'd' }]) }));
     await later(5);
     raw.transport.close();
     await expect(acc).rejects.toBeInstanceOf(XumuxClosedError);
@@ -715,7 +716,7 @@ describe('review regressions (close reply)', () => {
         await ready;
         yield encodeFrame(
           ctrl(ControlType.WELCOME, {
-            version: [0, 2, 0],
+            version: [0, 3, 0],
             channels: [{ id: 1, name: 'd', reliable: true, ordered: true }],
           }),
         );

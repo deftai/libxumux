@@ -1,11 +1,11 @@
 /**
- * xumux 0.2 protocol constants.
+ * xumux 0.3 protocol constants.
  * @see https://github.com/deftai/xumux/blob/main/spec/core.md
  * @module codec/constants
  */
 
 /** Protocol version spoken by this library. */
-export const PROTOCOL_VERSION: readonly [number, number, number] = [0, 2, 0];
+export const PROTOCOL_VERSION: readonly [number, number, number] = [0, 3, 0];
 
 /** Frame header flag bits (byte 3). Bit 0 is the least significant. */
 export const FrameFlags = {
@@ -30,6 +30,13 @@ export const ControlType = {
   CLOSE: 0x20,
   ERROR: 0xf0,
 } as const;
+
+/**
+ * Control types an extension may allocate (core §11.1), for example for an extension-defined
+ * first frame (core §3.1).
+ */
+export const EXTENSION_CONTROL_TYPE_MIN = 0x30;
+export const EXTENSION_CONTROL_TYPE_MAX = 0x7f;
 
 /** Probe types (any channel, PROBE set). */
 export const ProbeType = {
