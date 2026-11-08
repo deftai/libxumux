@@ -40,7 +40,9 @@ const server = new XumuxServer(new StdioAdapter(process.stdin, process.stdout), 
   maxChannels: cfg.maxChannels,
   handshakeTimeoutMs: cfg.handshakeTimeoutMs,
   onChannelRequest: (req) =>
-    req.name in behaviours ? true : { code: CloseCode.CHANNEL_REFUSED, reason: 'refused' },
+    Object.hasOwn(behaviours, req.name)
+      ? true
+      : { code: CloseCode.CHANNEL_REFUSED, reason: 'refused' },
 });
 server.addEventListener('channel', (e) => run(e.detail));
 // Let pending stdout writes drain, then stop reading so the process can exit.
