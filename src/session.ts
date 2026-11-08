@@ -1583,7 +1583,8 @@ export class XumuxServer extends XumuxPeer {
     const openReqs: ChannelRequest[] = [];
     for (const req of hello.channels ?? []) {
       if (accepted.length >= this.maxChannels()) {
-        rejected.push({ id: req.id, code: CloseCode.CHANNEL_LIMIT, reason: 'too many channels' });
+        // No reason: a long list of refusals must still fit in WELCOME.
+        rejected.push({ id: req.id, code: CloseCode.CHANNEL_LIMIT });
         continue;
       }
       const d = await this.decide(req);

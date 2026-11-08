@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { XumuxClient, XumuxServer } from './session.js';
 import { createInMemoryPair } from './transports/in-memory-adapter.js';
-import { CloseCode, DEFAULT_MAX_CHANNELS } from './codec/constants.js';
+import { CloseCode, CONTROL_MAX_PAYLOAD, DEFAULT_MAX_CHANNELS } from './codec/constants.js';
+import { rawPair } from '../tests/raw-peer.js';
 
 const spec = (name: string) => ({ name, reliable: true, ordered: true });
 
@@ -47,5 +48,36 @@ describe('maxChannels', () => {
     const [t] = createInMemoryPair('message');
     for (const bad of [0, -1, 1.5, Number.NaN])
       expect(() => new XumuxServer(t, { maxChannels: bad })).toThrow(RangeError);
+  });
+
+  it('still fits WELCOME when a full HELLO is mostly refused', async () => {
+    // As many channels as fit in one HELLO, against maxChannels: 1.
+    const { transport, raw } = rawPair();
+    const server = new XumuxServer(transport, {
+      pingInterval: 0,
+      closeTimeoutMs: 50, // the raw peer never answers CLOSE
+      maxChannels: 1,
+      onChannelRequest: () => true,
+    });
+    const accepted = server.accept();
+    const channels = [];
+    for (let id = 1; ; id += 2) {
+      channels.push({ id, name: '', reliable: true, ordered: true });
+      const size = JSON.stringify({ version: [0, 2, 0], channels }).length;
+      if (size > CONTROL_MAX_PAYLOAD - 100) {
+        channels.pop();
+        break;
+      }
+    }
+    const welcome = await raw.helloAndWelcome({ channels });
+    const body = JSON.parse(new TextDecoder().decode(welcome.payload)) as {
+      channels: unknown[];
+      rejected: { code: number; reason?: string }[];
+    };
+    expect(body.channels).toHaveLength(1);
+    expect(body.rejected).toHaveLength(channels.length - 1);
+    expect(body.rejected.every((r) => r.code === CloseCode.CHANNEL_LIMIT && !r.reason)).toBe(true);
+    await accepted;
+    await server.close();
   });
 });
