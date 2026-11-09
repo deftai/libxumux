@@ -615,6 +615,10 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
   private replayOut: Out[] = [];
   /** Position in the send order of the next retained frame, across channels. */
   private sendOrder = 0;
+  /** A server takeover is detaching the old path (session-resume/1 §6). */
+  protected takingOver = false;
+  /** Held frames being released: they were counted when they arrived. */
+  private releasingHeld = false;
 
   constructor(
     protected readonly transport: TransportAdapter,
@@ -1061,7 +1065,12 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     slot.heldBytes = 0;
     slot.open?.resolve(slot.ch);
     slot.open = undefined;
-    for (const f of held) this.handleFrame(f);
+    this.releasingHeld = true;
+    try {
+      for (const f of held) this.handleFrame(f);
+    } finally {
+      this.releasingHeld = false;
+    }
   }
 
   /**
@@ -1295,7 +1304,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
         return;
       }
       if (this.state !== 'open') return this.handlePreOpen(f);
-      if (this.rs) this.noteReceived(f);
+      if (this.rs && !this.releasingHeld) this.noteReceived(f);
       if (f.flags & FrameFlags.PROBE) return this.handleProbe(f);
       if (f.channel === CONTROL_CHANNEL) return this.handleControl(f);
       return this.handleData(f);
@@ -2135,7 +2144,9 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
   /** The base path was lost with session-resume/1 applying: wait up to resumeTimeout (§6). */
   private resumeDetached(): void {
     const rs = this.rs;
-    if (!rs) return;
+    // A takeover detaches only to attach the new path at once: no timer, no store slot (which
+    // could evict another client's session).
+    if (!rs || this.takingOver) return;
     if (rs.detachTimer) clearTimeout(rs.detachTimer);
     rs.detachTimer = unref(
       setTimeout(() => {
@@ -2283,7 +2294,6 @@ export class XumuxClient extends XumuxPeer {
     const rs = this.rs;
     if (!this.resumable) return Promise.reject(new Error('this connection cannot be resumed'));
     if (rs!.attempt) return Promise.reject(new Error('resume() is already in progress'));
-    if (this.path) this.detachBasePath('resuming on a new transport');
     const auth = options.auth ?? this.connectAuth;
     const frame = resumeFrame({
       version: [...PROTOCOL_VERSION] as Version,
@@ -2306,6 +2316,8 @@ export class XumuxClient extends XumuxPeer {
         ),
       );
       rs!.attempt = { path, timer, resolve, reject };
+      // Only now, so a 'detach' listener that calls resume() sees this attempt in progress.
+      if (this.path) this.detachBasePath('resuming on a new transport');
       path.start({
         frame: (f) => this.onResumeAnswer(path, f),
         end: () =>
@@ -2545,7 +2557,14 @@ export class XumuxServer extends XumuxPeer implements ResumableSession {
     const i = rs.tokens.findIndex((t) => constantTimeEqual(t.token, msg.token));
     if (i < 0) throw new XumuxProtocolError(CloseCode.RESUME_NOT_FOUND, 'unknown session');
     // A takeover (§6): stop reading the old transport and close it, without CLOSE.
-    if (this.path) this.detachBasePath('taken over by a new transport');
+    if (this.path) {
+      this.takingOver = true;
+      try {
+        this.detachBasePath('taken over by a new transport');
+      } finally {
+        this.takingOver = false;
+      }
+    }
     const frames = plan();
     // The presented token and the new one stay valid until the client's first frame on the
     // new transport (§3.3); every other one goes, except RESUME_TOKENs that are about to be

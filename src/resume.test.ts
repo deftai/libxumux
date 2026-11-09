@@ -345,6 +345,33 @@ describe('RECEIPT (§3.4, §5)', () => {
     await srv.close();
   });
 
+  it('counts a frame held until CHANNEL_ACK once', async () => {
+    const [t, rawEnd] = createInMemoryPair();
+    const raw = new RawPeer(rawEnd, 'message');
+    const client = new XumuxClient(t, base);
+    const p = client.connect({ extensions: [SESSION_RESUME] });
+    await raw.awaitHelloSendWelcome({ extensions: [SESSION_RESUME] });
+    raw.send(ctrl(RT.RESUME_TOKEN, { token: 'tok', resumeTimeout: 10 }));
+    await p;
+    const opened = client.openChannel({ name: 'x', reliable: true, ordered: true });
+    const id = json(await raw.control(ControlType.OPEN_CHANNEL)).id as number;
+    raw.send({ channel: id, type: 1, flags: 0, payload: new Uint8Array(1) }); // overtakes the ACK
+    raw.send(ctrl(ControlType.CHANNEL_ACK, { id, reliable: true, ordered: true }));
+    await opened;
+    await waitUntil(() =>
+      raw.frames
+        .filter(isReceipt)
+        .flatMap(receiptEntries)
+        .some(([c]) => c === id),
+    );
+    const counts = raw.frames
+      .filter(isReceipt)
+      .flatMap(receiptEntries)
+      .filter(([c]) => c === id);
+    expect(counts).toEqual([[id, 1]]);
+    await client.close();
+  });
+
   it('does not count frames on unknown channels', async () => {
     const { raw, srv } = await rawClient();
     raw.send({ channel: 99, type: 1, flags: 0, payload: new Uint8Array(1) });
@@ -563,6 +590,36 @@ describe('losing the transport and resuming (§6, §7)', () => {
     expect(store.detachedSessions).toBe(1);
     expect(a.client.detached).toBe(true);
     await b.server.close();
+  });
+
+  it('a takeover does not evict another detached session from a full store', async () => {
+    const store = new SessionResumeStore({ maxDetached: 1 });
+    const a = await resumablePair({ store });
+    const b = await resumablePair({ store });
+    a.net.cut();
+    await waitUntil(() => a.server.detached);
+    b.net.a.close = () => undefined; // b's server still thinks it is attached
+    const { r } = await reconnect(b.client, store);
+    expect(r.resumed).toBe(b.server);
+    expect(a.server.detached).toBe(true);
+    expect(store.detachedSessions).toBe(1);
+    await reconnect(a.client, store);
+    await a.client.close();
+    await b.client.close();
+  });
+
+  it('a detach listener cannot start a second resume() while one is starting', async () => {
+    const { store, net, client } = await resumablePair();
+    net.a.close = () => undefined;
+    let inner: unknown;
+    client.addEventListener(
+      'detach',
+      () => void client.resume(new LossyPair().a).catch((e: unknown) => (inner = e)),
+      { once: true },
+    );
+    await reconnect(client, store);
+    expect(String(inner)).toMatch(/in progress/);
+    await client.close();
   });
 
   it('close() while detached ends the session and forgets its token (4100)', async () => {
