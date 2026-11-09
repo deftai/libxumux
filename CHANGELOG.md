@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Framing and the transport moved out of the session into `BasePath` (core §1.2, layer 2): magic bytes, stream framing, core §2.3 steps 1–2 and writes. The session now holds a base path instead of a transport, so an extension can keep a session alive when its base path is lost and attach a new one (core §11.1). Nothing changes on the wire or in behaviour unless an extension asks for it: without one, a lost transport still closes the connection with `1001`.
+- `BasePath` can be paused and started with another sink, keeping a pending read and every byte already read (including a partial frame), so a transport can be handed from one session to another.
+- `XumuxPeer.detached` (always false without an extension that detaches), the `'detach'` event (`DetachInfo`), and the protected seam `keepOnPathLoss()`, `detachBasePath()` and `attachBasePath()` for extensions. While detached, sends queue as usual, keepalive is suspended, pending PINGs are rejected without counting as lost, and `close()` ends the session at once.
+
 ## [0.5.0] - 2026-11-08
 
 ### xumux 0.3 core (breaking on the wire)
