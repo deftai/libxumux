@@ -1233,6 +1233,14 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
     for (const slot of this.slots.values()) abandon(slot.pings);
     // Retransmissions not yet written are recomputed from the counts on the next resume.
     for (const o of this.replayOut.splice(0)) o.resolve();
+    if (this.rs) {
+      // Frames held until CHANNEL_ACK are not counted yet, so the peer retransmits them after
+      // a resume: drop these copies, or they would be delivered twice.
+      for (const slot of this.slots.values()) {
+        slot.held = [];
+        slot.heldBytes = 0;
+      }
+    }
     this.resumeDetached();
     this.dispatchEvent(new CustomEvent<DetachInfo>('detach', { detail: { reason } }));
   }

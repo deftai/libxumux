@@ -373,6 +373,39 @@ describe('RECEIPT (§3.4, §5)', () => {
       await client.close();
     });
 
+  it('drops frames held until CHANNEL_ACK when the transport is lost, as they are not counted', async () => {
+    const [t, rawEnd] = createInMemoryPair();
+    const raw = new RawPeer(rawEnd, 'message');
+    const client = new XumuxClient(t, base);
+    const p = client.connect({ extensions: [SESSION_RESUME] });
+    await raw.awaitHelloSendWelcome({ extensions: [SESSION_RESUME] });
+    raw.send(ctrl(RT.RESUME_TOKEN, { token: 'tok', resumeTimeout: 10 }));
+    await p;
+    const opened = client.openChannel({ name: 'x', reliable: true, ordered: true });
+    const id = json(await raw.control(ControlType.OPEN_CHANNEL)).id as number;
+    raw.send({ channel: id, type: 1, flags: 0, payload: new Uint8Array([7]) }); // overtakes the ACK
+    await tick();
+    raw.transport.close();
+    await waitUntil(() => client.detached);
+    // The new server lists the channel's frames as unreceived and retransmits ACK and data.
+    const a = rawServerFor(client);
+    const resume = json(await a.raw.control(RT.RESUME));
+    expect(resume.received).toEqual([
+      [0, 1],
+      [id, 0],
+    ]);
+    a.raw.send(ctrl(RT.RESUMED, { token: 'tok2', resumeTimeout: 10, received: [[0, 1]] }));
+    a.raw.send(ctrl(ControlType.CHANNEL_ACK, { id, reliable: true, ordered: true }));
+    a.raw.send({ channel: id, type: 1, flags: 0, payload: new Uint8Array([7]) });
+    await a.p;
+    const ch = await opened;
+    expect((await ch.receive())!.payload).toEqual(new Uint8Array([7]));
+    await tick();
+    const more = await Promise.race([ch.receive(), tick(20).then(() => 'none')]);
+    expect(more).toBe('none');
+    await client.close();
+  });
+
   it('does not count frames on unknown channels', async () => {
     const { raw, srv } = await rawClient();
     raw.send({ channel: 99, type: 1, flags: 0, payload: new Uint8Array(1) });
