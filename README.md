@@ -250,7 +250,7 @@ client.addEventListener('detach', async () => {
 });
 ```
 
-- `resume()` rejects with `XumuxResumeError`. With `sessionLost` (the server answered `4100`–`4103`, `1002` from a server without the extension, `4006`, RESUMED was inconsistent, or RESUME would not fit in 65536 bytes) the old connection has closed and the application connects again with HELLO. Otherwise (the transport failed, no answer within `handshakeTimeoutMs`, or another refusal such as `4000` or `4011`) the session is still detached and `resume()` can be retried until `resumeTimeout`, after which the client closes with `4101`.
+- `resume()` rejects with `XumuxResumeError`. With `sessionLost` (the server refused with any code other than `1001`, `4004`, `4007` or `4011`, for example `4100`–`4103`, `4000`, `4006`, or `1002` from a server without the extension; RESUMED was inconsistent; or RESUME would not fit in 65536 bytes) the old connection has closed and the application connects again with HELLO. Otherwise (the transport failed, no answer within `handshakeTimeoutMs`, or a retryable refusal: `1001`, `4004`, `4007` or `4011`) the session is still detached and `resume()` can be retried until `resumeTimeout`, after which the client closes with `4101`.
 - `resume()` on a session that is still attached closes the old transport first, without CLOSE. The server treats such a RESUME as a takeover.
 - `auth` defaults to the HELLO's: `resume(transport, { auth })` sends other credentials.
 - Only reliable, ordered channels on the base path are replayed, which on every binding this library supports is every channel.

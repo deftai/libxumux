@@ -379,14 +379,15 @@ interface ResumeAttempt {
   reject: (e: XumuxResumeError) => void;
 }
 
-/** CLOSE codes in answer to RESUME after which the session is gone (session-resume/1 §9). */
-const SESSION_LOST_CODES = new Set<number>([
-  CloseCode.PROTOCOL_ERROR,
-  CloseCode.VERSION_MISMATCH,
-  CloseCode.RESUME_NOT_FOUND,
-  CloseCode.RESUME_EXPIRED,
-  CloseCode.RESUME_DATA_LOST,
-  CloseCode.RESUME_STATE_MISMATCH,
+/**
+ * CLOSE codes in answer to RESUME that say nothing about the session, so resuming may be tried
+ * again (session-resume/1 §9). Any other code means the session is gone.
+ */
+const RESUME_RETRYABLE_CODES = new Set<number>([
+  CloseCode.GOING_AWAY,
+  CloseCode.RATE_LIMITED,
+  CloseCode.HELLO_TIMEOUT,
+  CloseCode.BUSY,
 ]);
 
 /** Channel-0 control types that are never counted or replayed (session-resume/1 §4). */
@@ -2291,12 +2292,13 @@ export class XumuxClient extends XumuxPeer {
    * If the session is still attached (this side may learn of a failure first), the old
    * transport is closed without CLOSE first. `auth` defaults to the HELLO's.
    *
-   * Rejects with {@link XumuxResumeError}. With `sessionLost` (the server answered 4100–4103,
-   * 1002 or 4006, RESUMED was inconsistent, or RESUME would exceed 65536 bytes, in which case
-   * `transport` is not used), the connection has closed and the application should connect
-   * again with HELLO. Otherwise (the transport failed, the server refused for another reason,
-   * or no answer came within `handshakeTimeoutMs`) the session is still detached and resume()
-   * may be called again, until `resumeTimeout` seconds after the transport was lost.
+   * Rejects with {@link XumuxResumeError}. With `sessionLost` (the server refused with any code
+   * other than 1001, 4004, 4007 or 4011, RESUMED was inconsistent, or RESUME would exceed 65536
+   * bytes, in which case `transport` is not used), the connection has closed and the
+   * application should connect again with HELLO. Otherwise (the transport failed, the server
+   * refused with 1001, 4004, 4007 or 4011, or no answer came within `handshakeTimeoutMs`) the
+   * session is still detached and resume() may be called again, with backoff, until
+   * `resumeTimeout` seconds after the transport was lost.
    */
   resume(
     transport: TransportAdapter,
@@ -2360,7 +2362,7 @@ export class XumuxClient extends XumuxPeer {
       if (control && f.type === ControlType.CLOSE) {
         const m = decodeClose(f.payload);
         this.writeClose(path, m.code);
-        const lost = SESSION_LOST_CODES.has(m.code);
+        const lost = !RESUME_RETRYABLE_CODES.has(m.code);
         return this.resumeFailed(path, m.code, m.reason ?? 'RESUME refused', lost, true);
       }
       if (!control || f.type !== ResumeControlType.RESUMED)

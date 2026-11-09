@@ -763,8 +763,9 @@ describe('RESUME refusals (§7 step 2)', () => {
       const fresh = new XumuxServer(net2.b, base);
       void fresh.accept({ sessionResume: store, authorize }).catch(() => undefined);
       const e = (await client.resume(net2.a).catch((x: unknown) => x)) as XumuxResumeError;
-      expect([e.code, e.sessionLost, e.remote]).toEqual([CloseCode.AUTH_FAILED, false, true]);
-      expect(client.detached).toBe(true);
+      // 4000 is not retryable (§9): the session is gone at the client.
+      expect([e.code, e.sessionLost, e.remote]).toEqual([CloseCode.AUTH_FAILED, true, true]);
+      expect(client.detached).toBe(false);
       await client.close();
     }
     // With it: the identity must match; a throw refuses with 4000.
@@ -780,23 +781,34 @@ describe('RESUME refusals (§7 step 2)', () => {
     });
     net.cut();
     await waitUntil(() => server.detached);
-    const tries: Array<[Record<string, unknown>, number]> = [
-      [{ user: 'bob' }, CloseCode.BUSY],
-      [{ boom: true }, CloseCode.AUTH_FAILED],
-    ];
-    for (const [auth, code] of tries) {
+    {
+      // A retryable refusal (4011) leaves the session detached.
       const net2 = new LossyPair();
       const fresh = new XumuxServer(net2.b, base);
       void fresh.accept({ sessionResume: store, authorizeResume }).catch(() => undefined);
       const e = (await client
-        .resume(net2.a, { auth })
+        .resume(net2.a, { auth: { user: 'bob' } })
         .catch((x: unknown) => x)) as XumuxResumeError;
-      expect([e.code, e.sessionLost]).toEqual([code, false]);
+      expect([e.code, e.sessionLost]).toEqual([CloseCode.BUSY, false]);
     }
     const { r } = await reconnect(client, store, { authorizeResume }); // HELLO's auth again
     expect(r.resumed).toBe(server);
     expect(seen.every((x) => x === server)).toBe(true);
     await client.close();
+    // A throw refuses with 4000, which ends the session at the client.
+    {
+      const p = await resumablePair({ accept: { authorize }, auth: { user: 'ann' } });
+      p.net.cut();
+      await waitUntil(() => p.server.detached);
+      const net2 = new LossyPair();
+      const fresh = new XumuxServer(net2.b, base);
+      void fresh.accept({ sessionResume: p.store, authorizeResume }).catch(() => undefined);
+      const e = (await p.client
+        .resume(net2.a, { auth: { boom: true } })
+        .catch((x: unknown) => x)) as XumuxResumeError;
+      expect([e.code, e.sessionLost]).toEqual([CloseCode.AUTH_FAILED, true]);
+      await p.client.close();
+    }
   });
 
   it('a session that ended while authorizeResume ran answers 4100', async () => {
@@ -1036,6 +1048,30 @@ describe('client resume() (§7, §9)', () => {
       const e = await a.p;
       expect([e.code, e.sessionLost]).toEqual([code, true]);
       expect((await client.closed).code).toBe(code);
+    }
+  });
+
+  it('treats only 1001, 4004, 4007 and 4011 on RESUME as retryable (§9)', async () => {
+    const cases: Array<[number, boolean]> = [
+      [CloseCode.GOING_AWAY, false],
+      [CloseCode.RATE_LIMITED, false],
+      [CloseCode.HELLO_TIMEOUT, false],
+      [CloseCode.BUSY, false],
+      [CloseCode.AUTH_FAILED, true],
+      [CloseCode.INVALID_MESSAGE, true],
+      [CloseCode.RESUME_EXPIRED, true],
+    ];
+    for (const [code, lost] of cases) {
+      const { net, client } = await resumablePair();
+      net.cut();
+      await waitUntil(() => client.detached);
+      const a = rawServerFor(client);
+      await a.raw.control(RT.RESUME);
+      a.raw.send(ctrl(ControlType.CLOSE, { code }));
+      const e = await a.p;
+      expect([e.code, e.sessionLost]).toEqual([code, lost]);
+      expect(client.detached).toBe(!lost);
+      await client.close();
     }
   });
 
