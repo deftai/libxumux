@@ -312,17 +312,24 @@ describe.skipIf(!haveGo)('session-resume/1 interop with libxumux-go', () => {
         expect(ch.properties).toMatchObject({ reliable: true, ordered: true });
         chs.push(ch);
       }
+      // Drop the socket (abruptly: unsent and unread bytes are lost) as the bytes received
+      // pass each mark, from the receive loop itself, so the transfer is certainly under way.
       const total = 26_000_000;
-      let got = 0;
-      const done = Promise.all(chs.map((ch) => bulk(ch, (n) => (got += n))));
       const drops = 3;
-      for (let i = 1; i <= drops; i++) {
-        await until(() => got >= (i * total) / (drops + 1), 'progress');
-        expect(got).toBeLessThan(total);
-        socket.destroy(); // abrupt: unsent and unread bytes are lost
-        await until(() => resumes === i, `resume ${i}`);
-      }
-      await done;
+      const droppedAt: number[] = [];
+      let got = 0;
+      const onBytes = (n: number): void => {
+        got += n;
+        const k = droppedAt.length;
+        if (k < drops && resumes === k && got >= ((k + 1) * total) / (drops + 1)) {
+          droppedAt.push(got);
+          socket.destroy();
+        }
+      };
+      await Promise.all(chs.map((ch) => bulk(ch, onBytes)));
+      expect(droppedAt).toHaveLength(drops);
+      for (const n of droppedAt) expect(n).toBeLessThan(total);
+      expect(resumes).toBe(drops);
       for (let i = 0; i < chs.length; i++)
         expect(await next((l) => l.startsWith('bulk '))).toMatch(/^bulk ok /);
 
@@ -354,10 +361,22 @@ describe.skipIf(!haveGo)('session-resume/1 interop with libxumux-go', () => {
       const sockets: net.Socket[] = [];
       let session: XumuxServer | undefined;
       let resumed = 0;
+      // Drop the socket from the receive loop as the bytes received pass each mark.
+      const total = 26_000_000;
+      const drops = 3;
+      const droppedAt: number[] = [];
       let got = 0;
+      const onBytes = (n: number): void => {
+        got += n;
+        const k = droppedAt.length;
+        if (k < drops && resumed === k && got >= ((k + 1) * total) / (drops + 1)) {
+          droppedAt.push(got);
+          sockets.at(-1)!.destroy();
+        }
+      };
       const exchanges: Array<Promise<void>> = [];
       const run = (ch: XumuxChannel): void => {
-        if (ch.name.startsWith('bulk:')) exchanges.push(bulk(ch, (n) => (got += n)));
+        if (ch.name.startsWith('bulk:')) exchanges.push(bulk(ch, onBytes));
       };
       // Keepalive: a socket destroyed here may not be noticed by the Go client's kernel at once.
       const serverOpts = { ...opts, pingInterval: 1, pingTimeout: 1 };
@@ -389,16 +408,11 @@ describe.skipIf(!haveGo)('session-resume/1 interop with libxumux-go', () => {
         });
         children.push(child);
         const exited = once(child, 'exit');
-        const total = 26_000_000;
-        const drops = 3;
-        for (let i = 1; i <= drops; i++) {
-          await until(() => got >= (i * total) / (drops + 1), 'progress');
-          expect(got).toBeLessThan(total);
-          sockets.at(-1)!.destroy();
-          await until(() => resumed === i, `resume ${i}`);
-        }
         await until(() => exchanges.length === 3, 'three channels');
         await Promise.all(exchanges);
+        expect(droppedAt).toHaveLength(drops);
+        for (const n of droppedAt) expect(n).toBeLessThan(total);
+        expect(resumed).toBe(drops);
         expect((await session!.close(1000, 'done')).code).toBe(1000);
         const [code] = await exited;
         expect(code).toBe(0);
