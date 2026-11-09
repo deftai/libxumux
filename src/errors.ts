@@ -37,8 +37,8 @@ export class XumuxClosedError extends Error {
 
 /**
  * `XumuxClient.resume()` failed (session-resume/1). With `sessionLost`, the earlier session is
- * gone (CLOSE 4100–4103, 1002 or 4006 from the server, a RESUME too large to send, or
- * inconsistent counts in RESUMED): the client has closed, and the application falls back to a
+ * gone (a CLOSE from the server with any code other than 1001, 4004, 4007 or 4011, a RESUME
+ * too large to send, or inconsistent counts in RESUMED): the client has closed, and the application falls back to a
  * new connection with HELLO. Otherwise the session is still detached and `resume()` may be
  * tried again on another transport, until `resumeTimeout`.
  */
