@@ -91,3 +91,36 @@ export interface ErrorMessage {
   channel?: number;
   reason?: string;
 }
+
+// ─── session-resume/1 ────────────────────────────────────────────────────────
+
+/** One `received` entry of RESUME or RESUMED: `[channel, count]` (session-resume/1 §4). */
+export type ReceiveCount = [channel: number, count: number];
+
+/** RESUME_TOKEN (0x30), server → client (session-resume/1 §3.1). */
+export interface ResumeTokenMessage {
+  token: string;
+  /** Seconds the server keeps the session after losing the transport, 1–3600. */
+  resumeTimeout: number;
+}
+
+/** RESUME (0x31), client → server, the first frame on a new transport (session-resume/1 §3.2). */
+export interface ResumeMessage {
+  version: Version;
+  token: string;
+  received: ReceiveCount[];
+  auth?: Record<string, unknown>;
+}
+
+/** RESUMED (0x32), server → client, the answer to RESUME (session-resume/1 §3.3). */
+export interface ResumedMessage {
+  token: string;
+  resumeTimeout: number;
+  received: ReceiveCount[];
+}
+
+/** One RECEIPT (0x33) entry: `count` replayed frames received on `channel` (session-resume/1 §3.4). */
+export interface ReceiptEntry {
+  channel: number;
+  count: number;
+}

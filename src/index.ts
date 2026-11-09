@@ -27,6 +27,9 @@ export type {
 export { BasePath } from './base-path.js';
 export type { BasePathSink } from './base-path.js';
 
+export { SessionResumeStore } from './resume.js';
+export type { SessionResumeOptions, ResumeRefusal } from './resume.js';
+
 export { XumuxChannel } from './channel.js';
 export type {
   ChannelState,
@@ -36,7 +39,7 @@ export type {
   ProbeStats,
 } from './channel.js';
 
-export { XumuxProtocolError, XumuxClosedError } from './errors.js';
+export { XumuxProtocolError, XumuxClosedError, XumuxResumeError } from './errors.js';
 
 export {
   PROTOCOL_VERSION,
@@ -53,6 +56,10 @@ export {
   DEFAULT_MAX_CHANNELS,
   EXTENSION_CONTROL_TYPE_MIN,
   EXTENSION_CONTROL_TYPE_MAX,
+  SESSION_RESUME,
+  ResumeControlType,
+  DEFAULT_RESUME_TIMEOUT,
+  DEFAULT_RESUME_FRAME_LIMIT,
 } from './codec/constants.js';
 export type { Frame } from './codec/frame.js';
 export { encodeFrame } from './codec/encode-frame.js';
@@ -70,6 +77,11 @@ export type {
   WindowUpdateEntry,
   CloseMessage,
   ErrorMessage,
+  ReceiveCount,
+  ResumeTokenMessage,
+  ResumeMessage,
+  ResumedMessage,
+  ReceiptEntry,
 } from './control/messages.js';
 
 export { createInMemoryPair } from './transports/in-memory-adapter.js';

@@ -12,7 +12,10 @@ import {
   ControlType,
   CONTROL_CHANNEL,
   FrameFlags,
+  MAX_RESUME_TIMEOUT,
+  MAX_RESUME_TOKEN,
   ProbeType,
+  ResumeControlType,
 } from '../codec/constants.js';
 import type { Frame } from '../codec/frame.js';
 import { XumuxProtocolError } from '../errors.js';
@@ -25,6 +28,11 @@ import type {
   CloseMessage,
   ErrorMessage,
   HelloMessage,
+  ReceiptEntry,
+  ReceiveCount,
+  ResumedMessage,
+  ResumeMessage,
+  ResumeTokenMessage,
   Version,
   WelcomeMessage,
   WindowUpdateEntry,
@@ -62,6 +70,23 @@ export function windowUpdateFrame(entries: WindowUpdateEntry[]): Frame {
     dv.setUint32(i * 6 + 2, e.increment);
   });
   return { channel: CONTROL_CHANNEL, type: ControlType.WINDOW_UPDATE, flags: 0, payload };
+}
+
+export const resumeTokenFrame = (m: ResumeTokenMessage): Frame =>
+  controlFrame(ResumeControlType.RESUME_TOKEN, m);
+export const resumeFrame = (m: ResumeMessage): Frame => controlFrame(ResumeControlType.RESUME, m);
+export const resumedFrame = (m: ResumedMessage): Frame =>
+  controlFrame(ResumeControlType.RESUMED, m);
+
+/** RECEIPT: one or more [channel:2][count:4] entries (session-resume/1 §3.4). */
+export function receiptFrame(entries: ReceiptEntry[]): Frame {
+  const payload = new Uint8Array(entries.length * 6);
+  const dv = new DataView(payload.buffer);
+  entries.forEach((e, i) => {
+    dv.setUint16(i * 6, e.channel);
+    dv.setUint32(i * 6 + 2, e.count >>> 0);
+  });
+  return { channel: CONTROL_CHANNEL, type: ResumeControlType.RECEIPT, flags: 0, payload };
 }
 
 /** PING or PONG on `channel` with a 4-byte token. */
@@ -278,4 +303,85 @@ export function decodeWindowUpdate(p: Uint8Array): WindowUpdateEntry[] {
 export function decodeProbeToken(p: Uint8Array): number | null {
   if (p.length !== 4) return null;
   return new DataView(p.buffer, p.byteOffset, 4).getUint32(0);
+}
+
+// ─── session-resume/1 ────────────────────────────────────────────────────────
+
+function resumeToken(o: Obj, what: string): string {
+  const t = str(o, 'token', what);
+  const n = te.encode(t).length;
+  if (n === 0 || n > MAX_RESUME_TOKEN)
+    invalid(`${what}: 'token' must be 1 to ${MAX_RESUME_TOKEN} bytes`);
+  return t;
+}
+
+function resumeTimeout(o: Obj, what: string): number {
+  const v = o.resumeTimeout;
+  if (typeof v !== 'number' || !(v >= 1 && v <= MAX_RESUME_TIMEOUT))
+    invalid(`${what}: 'resumeTimeout' must be a number from 1 to ${MAX_RESUME_TIMEOUT}`);
+  return v;
+}
+
+/** A `received` list: `[id, count]` pairs, one per channel, including channel 0. */
+function receiveCounts(o: Obj, what: string): ReceiveCount[] {
+  const v = o.received;
+  if (!Array.isArray(v)) invalid(`${what}: 'received' must be an array`);
+  const seen = new Set<number>();
+  const out: ReceiveCount[] = [];
+  for (const e of v) {
+    if (
+      !Array.isArray(e) ||
+      e.length !== 2 ||
+      !isInt(e[0]) ||
+      e[0] < 0 ||
+      e[0] > 0xfffe ||
+      !isInt(e[1]) ||
+      e[1] < 0 ||
+      e[1] > 0xffffffff
+    )
+      invalid(`${what}: 'received' entries must be [channel, count] integers`);
+    const [id, count] = e as [number, number];
+    if (seen.has(id)) invalid(`${what}: channel ${id} is listed twice in 'received'`);
+    seen.add(id);
+    out.push([id, count]);
+  }
+  if (!seen.has(CONTROL_CHANNEL)) invalid(`${what}: 'received' has no entry for channel 0`);
+  return out;
+}
+
+export function decodeResumeToken(p: Uint8Array): ResumeTokenMessage {
+  const w = 'RESUME_TOKEN';
+  const o = parseObject(p, w);
+  return { token: resumeToken(o, w), resumeTimeout: resumeTimeout(o, w) };
+}
+
+export function decodeResume(p: Uint8Array): ResumeMessage {
+  const w = 'RESUME';
+  const o = parseObject(p, w);
+  return {
+    version: version(o, w),
+    token: resumeToken(o, w),
+    received: receiveCounts(o, w),
+    auth: optObj(o, 'auth', w),
+  };
+}
+
+export function decodeResumed(p: Uint8Array): ResumedMessage {
+  const w = 'RESUMED';
+  const o = parseObject(p, w);
+  return {
+    token: resumeToken(o, w),
+    resumeTimeout: resumeTimeout(o, w),
+    received: receiveCounts(o, w),
+  };
+}
+
+export function decodeReceipt(p: Uint8Array): ReceiptEntry[] {
+  if (p.length === 0 || p.length % 6 !== 0)
+    invalid(`RECEIPT: payload length ${p.length} is not a positive multiple of 6`);
+  const dv = new DataView(p.buffer, p.byteOffset, p.byteLength);
+  const out: ReceiptEntry[] = [];
+  for (let i = 0; i < p.length; i += 6)
+    out.push({ channel: dv.getUint16(i), count: dv.getUint32(i + 2) });
+  return out;
 }

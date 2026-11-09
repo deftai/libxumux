@@ -60,7 +60,7 @@ await client.close();
 - **Peer-opened channels need a policy.** Pass `onChannelRequest: (req) => true | { code, reason }`. Without it, every channel the peer opens (including HELLO channels on a server) is refused with `1003`. Accepted dynamic channels arrive on the `'channel'` event.
 - **Probes.** `channel.ping()` and `peer.ping()` measure round-trip time. `channel.stats` and `peer.stats` give `{ rtt, srtt, rttvar, probesSent, probesLost }`. Keepalive pings only when the connection is idle (`pingInterval` and `pingTimeout`, in seconds; the server's values apply).
 - **Closing.** `channel.close(code?, reason?)` and `peer.close(code?, reason?)` resolve when the close is complete. `peer.closed` and `channel.closed` are promises. When a channel closes with a code other than `1000`, a pending `receive()` rejects with `XumuxClosedError`.
-- **Events** (`addEventListener`): `'channel'`, `'channel-close'`, `'peer-error'` (the peer sent ERROR) and `'close'`.
+- **Events** (`addEventListener`): `'channel'`, `'channel-close'`, `'peer-error'` (the peer sent ERROR) and `'close'`; with [session resume](#session-resume-session-resume1), also `'detach'` and `'resume'`.
 
 ### Options
 
@@ -194,7 +194,7 @@ The core's extension hooks are exposed for code that implements an extension:
 
 - **`extensionParams`** (core §3.8). The client sends parameters with `connect({ extensions, extensionParams })`; only keys for requested extensions are sent. The server decides per extension with `accept({ extensions, negotiateExtension })`, returning `true`, `{ params }` (sent in WELCOME) or `false` (leave the extension out). Keys for extensions that are not accepted are ignored on both sides and never sent in WELCOME. The client checks WELCOME parameters with `connect({ checkExtensionParams })`; `false` or a throw closes with `4001`. Both results carry `extensions` and the peer's `extensionParams` for the accepted extensions.
 - **Base path** (core §1.2, §11.1). A session reads and writes frames through a `BasePath`, which owns the transport, magic bytes and framing. An extension that keeps a connection alive across transports overrides the protected `keepOnPathLoss()` and uses `detachBasePath()` / `attachBasePath()`. While detached (`peer.detached`, `'detach'` event), sends queue and keepalive is suspended. Without such an extension, a lost transport closes the connection with `1001` as before.
-- **First frames** (core §3.1). `accept({ firstFrames: { [type]: handler } })` lets an extension claim a control type in `0x30`–`0x7F` as the first frame of a transport, instead of HELLO. The handler answers with a refusal (`{ code, reason }`, sent as CLOSE). With no handler for the type, the server closes with `1002`.
+- **First frames** (core §3.1). `accept({ firstFrames: { [type]: handler } })` lets an extension claim a control type in `0x30`–`0x7F` as the first frame of a transport, instead of HELLO. The handler answers with a refusal (`{ code, reason }`, sent as CLOSE), or with `{ handOff(path) }`, which gives the paused base path, with every byte read after the first frame, to another session and returns what `accept()` resolves with (session-resume/1 is built on this). With no handler for the type, the server closes with `1002`.
 
 ```ts
 await server.accept({
@@ -203,6 +203,70 @@ await server.accept({
     (params as { level?: number } | undefined)?.level === 3 ? { params: { level: 2 } } : false,
 });
 ```
+
+## Session resume (`session-resume/1`)
+
+[session-resume/1](https://github.com/deftai/xumux/blob/v0.3.0-draft/spec/extensions/session-resume.md) lets a client reconnect after its transport fails and continue the same connection: the same channels and flow-control state, with nothing lost or duplicated. It is for short outages (Wi-Fi to cellular, sleep and wake, a proxy restart). Nothing changes on the wire for application frames: each side counts the frames it sends and receives per channel, keeps a copy of each until the peer acknowledges it with a RECEIPT, and after a resume retransmits exactly what the peer is missing, in the original order. The copies are bounded by each channel's flow-control window plus `resumeFrameLimit` frames.
+
+**Server.** One `SessionResumeStore` per server, passed to every `accept()`. It advertises the extension, issues the tokens and keeps detached sessions for `resumeTimeout` seconds. A transport whose first frame is RESUME is handed to the session it resumes, and `accept()` resolves with `resumed` set to that session:
+
+```ts
+import { SessionResumeStore, XumuxServer } from 'libxumux';
+
+const resume = new SessionResumeStore({ resumeTimeout: 120 }); // seconds, 1-3600
+
+wss.on('connection', async (ws) => {
+  const server = new XumuxServer(new WebSocketAdapter(ws), { onChannelRequest: () => true });
+  const r = await server.accept({
+    sessionResume: resume,
+    authorize: (hello) => checkUser(hello.auth),
+    // Required with authorize: RESUME must authenticate the same identity (spec §8).
+    authorizeResume: (msg, session) =>
+      userOf(msg.auth) === userOfSession(session) ? undefined : { code: 4000 },
+  });
+  if (r.resumed) return; // an earlier session now runs on this transport and carries on
+  serve(server, r.channels);
+});
+```
+
+**Client.** Ask for the extension in `connect()`. When the transport is lost, the session detaches instead of closing (`'detach'` event, `client.detached`): channels stay open, sends queue as usual until credit runs out, and keepalive pauses. Open a new transport with the same binding and call `resume()`:
+
+```ts
+import { SESSION_RESUME, XumuxClient, XumuxResumeError } from 'libxumux';
+
+const client = new XumuxClient(await dialWebSocket());
+const { channels } = await client.connect({ extensions: [SESSION_RESUME], channels: [...] });
+
+client.addEventListener('detach', async () => {
+  for (let attempt = 0; client.detached; attempt++) {
+    try {
+      await client.resume(await dialWebSocket()); // RESUME instead of HELLO
+      return; // 'resume' event: everything carries on
+    } catch (e) {
+      if (e instanceof XumuxResumeError && e.sessionLost) return startOver(); // HELLO again
+      await sleep(Math.min(30_000, 500 * 2 ** attempt)); // transport failed: try again
+    }
+  }
+});
+```
+
+- `resume()` rejects with `XumuxResumeError`. With `sessionLost` (the server answered `4100`–`4103`, `1002` from a server without the extension, `4006`, RESUMED was inconsistent, or RESUME would not fit in 65536 bytes) the old connection has closed and the application connects again with HELLO. Otherwise (the transport failed, no answer within `handshakeTimeoutMs`, or another refusal such as `4000` or `4011`) the session is still detached and `resume()` can be retried until `resumeTimeout`, after which the client closes with `4101`.
+- `resume()` on a session that is still attached closes the old transport first, without CLOSE. The server treats such a RESUME as a takeover.
+- `auth` defaults to the HELLO's: `resume(transport, { auth })` sends other credentials.
+- Only reliable, ordered channels on the base path are replayed, which on every binding this library supports is every channel.
+- The token is a bearer secret: send RESUME only over an encrypted transport, or a local one (stdio, Unix sockets), as for HELLO `auth`, and never in TLS or QUIC 0-RTT early data.
+
+| API                                                               |                                                                                                                                                                  |
+| ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `new SessionResumeStore({ resumeTimeout?, maxDetached? })`        | Seconds a detached session is kept (default 120); most detached sessions kept, the oldest discarded past it (default 1000). `store.detachedSessions` counts them |
+| `AcceptOptions.sessionResume`, `authorizeResume(resume, session)` | Enable the extension; authenticate a RESUME (default: accept, or refuse with `4000` if the session had `authorize`)                                              |
+| `AcceptResult.resumed`                                            | The earlier session the transport resumed, if it did                                                                                                             |
+| `server.rotateResumeToken()`                                      | Send a new token; the old one stops working once the client acknowledges it                                                                                      |
+| `client.resumable`, `client.resume(transport, { auth? })`         | Whether the session can be resumed; resume it                                                                                                                    |
+| `peer.detached`, `'detach'` / `'resume'` events                   | The base path is lost / back                                                                                                                                     |
+| `XumuxOptions.resumeFrameLimit`                                   | Unacknowledged frames per channel before sending waits for a RECEIPT, at least 128 (default 4096)                                                                |
+
+Per-identity caps on detached sessions and rate limits on failed RESUMEs per source are left to the application (the spec recommends both), since only it knows identities and sources: `authorizeResume` can refuse with `4011` (BUSY).
 
 ## Migrating from 0.2
 
