@@ -1,6 +1,10 @@
 /**
  * Shared helpers for E2E tests.
  */
+import { spawnSync, execFileSync } from 'node:child_process';
+import { copyFileSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import type { XumuxClient, XumuxServer, ConnectResult, AcceptResult } from '../../src/session.js';
 import type { XumuxChannel } from '../../src/channel.js';
 
@@ -82,4 +86,36 @@ export function expectAll(
     probeWorks: true,
     gracefulCloseWorks: true,
   });
+}
+
+// ─── Interop with libxumux-go ──────────────────────────────────────────────────
+
+// LIBXUMUX_GO_DIR must be a libxumux-go that speaks the same xumux version (0.3): 0.x
+// minors refuse each other, so against a 0.2 checkout the handshake closes with 4006.
+const goDir = process.env.LIBXUMUX_GO_DIR;
+
+/** LIBXUMUX_GO_DIR is set and the go tool is installed. */
+export const haveGo = !!goDir && spawnSync('go', ['version']).status === 0;
+
+/**
+ * Build the Go program in tests/interop/`name` against the libxumux-go checkout in
+ * LIBXUMUX_GO_DIR, and return the binary's path.
+ */
+export function buildGoPeer(name: string): string {
+  const dir = mkdtempSync(path.join(tmpdir(), `xumux-${name}-`));
+  const src = path.join(import.meta.dirname, '../interop', name, 'main.go');
+  copyFileSync(src, path.join(dir, 'main.go'));
+  const goMod = readFileSync(path.join(goDir!, 'go.mod'), 'utf8');
+  const goVersion = /^go (\S+)/m.exec(goMod)?.[1] ?? '1.24';
+  writeFileSync(
+    path.join(dir, 'go.mod'),
+    `module peer\n\ngo ${goVersion}\n\nrequire github.com/deftai/libxumux-go v0.0.0\n\n` +
+      `replace github.com/deftai/libxumux-go => ${path.resolve(goDir!)}\n`,
+  );
+  if (existsSync(path.join(goDir!, 'go.sum')))
+    copyFileSync(path.join(goDir!, 'go.sum'), path.join(dir, 'go.sum'));
+  const bin = path.join(dir, 'peer');
+  execFileSync('go', ['mod', 'tidy'], { cwd: dir, stdio: 'inherit' });
+  execFileSync('go', ['build', '-o', bin, '.'], { cwd: dir, stdio: 'inherit' });
+  return bin;
 }

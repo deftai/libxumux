@@ -5,9 +5,9 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import * as net from 'node:net';
 import * as tls from 'node:tls';
-import { spawn, spawnSync, execFileSync, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { copyFileSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
@@ -17,6 +17,7 @@ import { XumuxClient, XumuxServer } from '../../src/session.js';
 import { TcpAdapter } from '../../src/transports/tcp-adapter.js';
 import { StdioAdapter } from '../../src/transports/stdio-adapter.js';
 import { CloseCode } from '../../src/codec/constants.js';
+import { buildGoPeer, haveGo } from './helpers.js';
 import {
   dialPipe,
   PipeListener,
@@ -185,37 +186,12 @@ describe('pipe/1 over TCP', () => {
 
 // ─── Interop with libxumux-go ──────────────────────────────────────────────────
 
-// LIBXUMUX_GO_DIR must be a libxumux-go that speaks the same xumux version (0.3): 0.x
-// minors refuse each other, so against a 0.2 checkout the handshake closes with 4006.
-const goDir = process.env.LIBXUMUX_GO_DIR;
-const haveGo = !!goDir && spawnSync('go', ['version']).status === 0;
-
-/** Build tests/interop/go-pipe-peer against the libxumux-go checkout in LIBXUMUX_GO_DIR. */
-function buildGoPeer(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), 'xumux-go-peer-'));
-  const src = path.join(import.meta.dirname, '../interop/go-pipe-peer/main.go');
-  copyFileSync(src, path.join(dir, 'main.go'));
-  const goMod = readFileSync(path.join(goDir!, 'go.mod'), 'utf8');
-  const goVersion = /^go (\S+)/m.exec(goMod)?.[1] ?? '1.24';
-  writeFileSync(
-    path.join(dir, 'go.mod'),
-    `module peer\n\ngo ${goVersion}\n\nrequire github.com/deftai/libxumux-go v0.0.0\n\n` +
-      `replace github.com/deftai/libxumux-go => ${path.resolve(goDir!)}\n`,
-  );
-  if (existsSync(path.join(goDir!, 'go.sum')))
-    copyFileSync(path.join(goDir!, 'go.sum'), path.join(dir, 'go.sum'));
-  const bin = path.join(dir, 'peer');
-  execFileSync('go', ['mod', 'tidy'], { cwd: dir, stdio: 'inherit' });
-  execFileSync('go', ['build', '-o', bin, '.'], { cwd: dir, stdio: 'inherit' });
-  return bin;
-}
-
 describe.skipIf(!haveGo)('pipe/1 interop with libxumux-go', () => {
   it(
     'half-closes, echoes, resets and accepts pipes opened by Go',
     { timeout: 120_000 },
     async () => {
-      const bin = buildGoPeer();
+      const bin = buildGoPeer('go-pipe-peer');
       const child: ChildProcess = spawn(bin, [], { stdio: ['pipe', 'pipe', 'inherit'] });
       const exited = once(child, 'exit');
       const listener = new PipeListener();

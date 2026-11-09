@@ -24,6 +24,29 @@ jobs:
       # with libxumux-go skips itself without LIBXUMUX_GO_DIR.
       - name: e2e
         run: npx vitest run --config vitest.e2e.config.ts
+  # The e2e tests again, against libxumux-go (pipe/1 and session-resume/1 interop).
+  interop-go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: false
+      # TEMPORARY: session-resume/1 is on libxumux-go's feat/session-resume branch
+      # (deftai/libxumux-go#14). Switch this back to --branch main once that PR has merged.
+      - name: Check out libxumux-go
+        run: git clone --depth 1 --branch feat/session-resume https://github.com/deftai/libxumux-go "$RUNNER_TEMP/libxumux-go"
+      - run: npm ci
+      - run: npm run build
+      - name: e2e with libxumux-go
+        run: npx vitest run --config vitest.e2e.config.ts
+        env:
+          LIBXUMUX_GO_DIR: ${{ runner.temp }}/libxumux-go
   # The behavioural conformance suite lives in the spec repository.
   conformance:
     runs-on: ubuntu-latest
