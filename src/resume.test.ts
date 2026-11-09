@@ -345,32 +345,33 @@ describe('RECEIPT (§3.4, §5)', () => {
     await srv.close();
   });
 
-  it('counts a frame held until CHANNEL_ACK once', async () => {
-    const [t, rawEnd] = createInMemoryPair();
-    const raw = new RawPeer(rawEnd, 'message');
-    const client = new XumuxClient(t, base);
-    const p = client.connect({ extensions: [SESSION_RESUME] });
-    await raw.awaitHelloSendWelcome({ extensions: [SESSION_RESUME] });
-    raw.send(ctrl(RT.RESUME_TOKEN, { token: 'tok', resumeTimeout: 10 }));
-    await p;
-    const opened = client.openChannel({ name: 'x', reliable: true, ordered: true });
-    const id = json(await raw.control(ControlType.OPEN_CHANNEL)).id as number;
-    raw.send({ channel: id, type: 1, flags: 0, payload: new Uint8Array(1) }); // overtakes the ACK
-    raw.send(ctrl(ControlType.CHANNEL_ACK, { id, reliable: true, ordered: true }));
-    await opened;
-    await waitUntil(() =>
-      raw.frames
+  for (const requested of [true, false])
+    it(`counts a frame held until CHANNEL_ACK once (requested reliable: ${requested})`, async () => {
+      const [t, rawEnd] = createInMemoryPair();
+      const raw = new RawPeer(rawEnd, 'message');
+      const client = new XumuxClient(t, base);
+      const p = client.connect({ extensions: [SESSION_RESUME] });
+      await raw.awaitHelloSendWelcome({ extensions: [SESSION_RESUME] });
+      raw.send(ctrl(RT.RESUME_TOKEN, { token: 'tok', resumeTimeout: 10 }));
+      await p;
+      const opened = client.openChannel({ name: 'x', reliable: requested, ordered: requested });
+      const id = json(await raw.control(ControlType.OPEN_CHANNEL)).id as number;
+      raw.send({ channel: id, type: 1, flags: 0, payload: new Uint8Array(1) }); // overtakes the ACK
+      raw.send(ctrl(ControlType.CHANNEL_ACK, { id, reliable: true, ordered: true }));
+      await opened;
+      await waitUntil(() =>
+        raw.frames
+          .filter(isReceipt)
+          .flatMap(receiptEntries)
+          .some(([c]) => c === id),
+      );
+      const counts = raw.frames
         .filter(isReceipt)
         .flatMap(receiptEntries)
-        .some(([c]) => c === id),
-    );
-    const counts = raw.frames
-      .filter(isReceipt)
-      .flatMap(receiptEntries)
-      .filter(([c]) => c === id);
-    expect(counts).toEqual([[id, 1]]);
-    await client.close();
-  });
+        .filter(([c]) => c === id);
+      expect(counts).toEqual([[id, 1]]);
+      await client.close();
+    });
 
   it('does not count frames on unknown channels', async () => {
     const { raw, srv } = await rawClient();

@@ -617,7 +617,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
   private sendOrder = 0;
   /** A server takeover is detaching the old path (session-resume/1 §6). */
   protected takingOver = false;
-  /** Held frames being released: they were counted when they arrived. */
+  /** Held frames being released (they are counted now, by the channel's accepted properties). */
   private releasingHeld = false;
 
   constructor(
@@ -1304,7 +1304,7 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
         return;
       }
       if (this.state !== 'open') return this.handlePreOpen(f);
-      if (this.rs && !this.releasingHeld) this.noteReceived(f);
+      if (this.rs) this.noteReceived(f);
       if (f.flags & FrameFlags.PROBE) return this.handleProbe(f);
       if (f.channel === CONTROL_CHANNEL) return this.handleControl(f);
       return this.handleData(f);
@@ -1961,7 +1961,8 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
       this.pruneTokens();
     }
     const probe = (f.flags & FrameFlags.PROBE) !== 0;
-    if (rs.awaitingToken) {
+    // A held frame overtook WELCOME or its ACK; the first-frame rule is about what follows WELCOME.
+    if (rs.awaitingToken && !this.releasingHeld) {
       if (probe || f.channel !== CONTROL_CHANNEL || f.type !== ResumeControlType.RESUME_TOKEN)
         throw protocolError('the first frame after WELCOME must be RESUME_TOKEN');
     }
@@ -1973,7 +1974,9 @@ export abstract class XumuxPeer extends EventTarget implements ChannelHost {
       ctr.unreceiptedBytes += f.payload.length;
     } else {
       const slot = this.slots.get(f.channel);
-      if (!slot || !replayed(slot)) return;
+      // Frames held until CHANNEL_ACK are counted when released, once the channel's effective
+      // properties say whether it is replayed.
+      if (!slot || !replayed(slot) || (slot.ch.state === 'opening' && slot.ch.localOpener)) return;
       ctr = slot.replay;
     }
     ctr.recv = (ctr.recv + 1) >>> 0;
